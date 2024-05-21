@@ -21035,7 +21035,6 @@ func RunCategoryAction(resp http.ResponseWriter, request *http.Request) {
 		user.ActiveOrg.Id = exec.ExecutionOrg
 	}
 
-
 	if user.Role == "org-reader" {
 		log.Printf("[WARNING] Org-reader doesn't have access to run category action: %s (%s)", user.Username, user.Id)
 		resp.WriteHeader(403)
