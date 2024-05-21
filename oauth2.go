@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/google/go-querystring/query"
-	uuid "github.com/satori/go.uuid"
+	"github.com/satori/go.uuid"
 	"golang.org/x/oauth2"
 )
 
@@ -819,6 +819,7 @@ func HandleNewOutlookRegister(resp http.ResponseWriter, request *http.Request) {
 		RefreshToken: accessToken.RefreshToken,
 		Expiry:       accessToken.Expiry,
 	}
+
 
 	//log.Printf("%#v", trigger)
 	log.Println(trigger.WorkflowId)
@@ -2955,10 +2956,10 @@ func MakeGmailWebhookRequest(ctx context.Context, webhookUrl string, mappedData 
 	return nil
 }
 
-func RefreshOutlookClient(ctx context.Context, auth TriggerAuth) error {
+func RefreshOutlookClient(ctx context.Context, auth TriggerAuth) (error) {
 	// Manually recreate the oauthtoken
 	conf := &oauth2.Config{
-		ClientID:     os.Getenv("OFFICE365_CLIENT_ID"),
+		ClientID: os.Getenv("OFFICE365_CLIENT_ID"),
 		ClientSecret: os.Getenv("OFFICE365_CLIENT_SECRET"),
 		Scopes: []string{
 			"Mail.Read",
@@ -3543,7 +3544,7 @@ func GetOauth2ApplicationPermissionToken(ctx context.Context, user User, appAuth
 		}
 	}
 
-	if len(tokenUrl) == 0 || len(clientId) == 0 || len(clientSecret) == 0 {
+	if len(tokenUrl) == 0 || len(clientId) == 0 || len(clientSecret) == 0  {
 		return appAuth, fmt.Errorf("Missing oauth2 fields. Required: token_uri, client_id, client_secret, scopes")
 	}
 
@@ -3552,7 +3553,7 @@ func GetOauth2ApplicationPermissionToken(ctx context.Context, user User, appAuth
 		refreshData = fmt.Sprintf("grant_type=%s", grantType)
 	}
 
-	if grantType == "password" {
+	if grantType == "password" { 
 		if len(username) > 0 {
 			refreshData += fmt.Sprintf("&username=%s", username)
 		}
@@ -3568,6 +3569,7 @@ func GetOauth2ApplicationPermissionToken(ctx context.Context, user User, appAuth
 	if len(scope) > 0 {
 		refreshData += fmt.Sprintf("&scope=%s", strings.Replace(scope, ",", " ", -1))
 	}
+
 
 	log.Printf("[DEBUG] Oauth2 REFRESH DATA: %s. URL: %s", refreshData, tokenUrl)
 
@@ -3633,7 +3635,7 @@ func GetOauth2ApplicationPermissionToken(ctx context.Context, user User, appAuth
 				log.Printf("[ERROR] Oauth2 application auth (3): Failed to read response body: %s", err)
 				return appAuth, err
 			}
-		}
+		} 
 
 		// Takes care of both old and new request
 		if newresp.StatusCode >= 300 {
@@ -3666,7 +3668,7 @@ func GetOauth2ApplicationPermissionToken(ctx context.Context, user User, appAuth
 	}
 
 	appAuth.Fields = append(appAuth.Fields, AuthenticationStore{
-		Key:   "access_token",
+		Key: "access_token",
 		Value: foundToken,
 	})
 
@@ -3680,6 +3682,7 @@ func RunOauth2Request(ctx context.Context, user User, appAuth AppAuthenticationS
 	transport.MaxIdleConnsPerHost = 100
 	transport.ResponseHeaderTimeout = time.Second * 10
 	transport.Proxy = nil
+
 
 	requestData := DataToSend{
 		GrantType: "authorization_code",
@@ -3713,7 +3716,7 @@ func RunOauth2Request(ctx context.Context, user User, appAuth AppAuthenticationS
 		} else if field.Key == "oauth_url" {
 			oauthUrl = field.Value
 		} else {
-			if field.Key == "url" {
+			if field.Key == "url" { 
 			} else {
 			}
 		}
@@ -3940,7 +3943,7 @@ func RunOauth2Request(ctx context.Context, user User, appAuth AppAuthenticationS
 	}
 
 	if len(oauthResp.RefreshToken) > 0 {
-		//log.Printf("[DEBUG] Got NEW refresh token %s", oauthResp.RefreshToken)
+		//log.Printf("[DEBUG] Got NEW refresh token %s", oauthResp.RefreshToken) 
 
 		newauth := []AuthenticationStore{}
 		for _, item := range appAuth.Fields {

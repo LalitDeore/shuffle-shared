@@ -3343,6 +3343,7 @@ func GetAllOpenApi(ctx context.Context) ([]ParsedOpenApi, error) {
 	return apis, nil
 }
 
+
 func GetOrgByCreatorId(ctx context.Context, id string) (*Org, error) {
 	nameKey := "Organizations"
 	cacheKey := fmt.Sprintf("creator_%s_%s", nameKey, id)
@@ -6184,7 +6185,6 @@ func GetUserApps(ctx context.Context, userId string) ([]WorkflowApp, error) {
 			}
 		}
 	}
-	var err error
 
 	userApps := []WorkflowApp{}
 	indexName := "workflowapp"
@@ -10169,7 +10169,7 @@ func GetAllWorkflowExecutions(ctx context.Context, workflowId string, amount int
 
 func GetOrgByField(ctx context.Context, fieldName, value string) ([]Org, error) {
 	nameKey := "Organizations"
-	log.Printf("inside getorg by field")
+
 	var orgs []Org
 	if project.DbType == "opensearch" {
 		var buf bytes.Buffer
