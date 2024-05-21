@@ -14,7 +14,6 @@ import (
 	"io/ioutil"
 	"log"
 	"net/http"
-	"regexp"
 	"strconv"
 
 	//"net/url"
