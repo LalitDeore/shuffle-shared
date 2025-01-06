@@ -18,6 +18,8 @@ import (
 	"sort"
 	"sync"
 
+	scheduler "cloud.google.com/go/scheduler/apiv1"
+	"cloud.google.com/go/scheduler/apiv1/schedulerpb"
 	"gopkg.in/yaml.v3"
 
 	//"os/exec"
@@ -4794,6 +4796,25 @@ func HandleGetTriggers(resp http.ResponseWriter, request *http.Request) {
 		pipelineMap[pipeline.ID] = pipeline
 	}
 
+	if project.Environment == "cloud" {
+
+		for index, schedule := range schedules {
+			// Check if the schedule exist in the gcp
+			GcpSchedule, err := GetGcpSchedule(ctx, schedule.Id)
+			if err != nil {
+				schedules[index].Status = "stopped"
+				scheduleMap[schedule.Id] = schedule
+			}
+
+			if err == nil {
+				schedules[index].Status = GcpSchedule.Status
+				scheduleMap[schedule.Id] = schedule
+			}
+
+		}
+
+	}
+
 	allHooks := []Hook{}
 	allSchedules := []ScheduleOld{}
 	// Now loop through the workflow triggers to see if anything is not in sync
@@ -4972,6 +4993,44 @@ func HandleGetTriggers(resp http.ResponseWriter, request *http.Request) {
 
 	resp.WriteHeader(200)
 	resp.Write(newjson)
+}
+
+func GetGcpSchedule(ctx context.Context, id string) (*ScheduleOld, error) {
+
+	schedule := &ScheduleOld{}
+
+	c, err := scheduler.NewCloudSchedulerClient(ctx)
+	if err != nil {
+		log.Printf("[ERROR] Client error: %s", err)
+		return schedule, err
+	}
+
+	location := "europe-west2"
+
+	if len(os.Getenv("SHUFFLE_GCEPROJECT")) > 0 && len(os.Getenv("SHUFFLE_GCEPROJECT_LOCATION")) > 0 {
+		location = os.Getenv("SHUFFLE_GCEPROJECT_LOCATION")
+	}
+
+	req := &schedulerpb.GetJobRequest{
+		Name: fmt.Sprintf("projects/%s/locations/%s/jobs/schedule_%s", gceProject, location, id),
+	}
+
+	resp, err := c.GetJob(ctx, req)
+	if err != nil {
+		log.Printf("[ERROR] Failed getting schedule %s: %s", id, err)
+		return schedule, err
+	}
+
+	schedule.Id = id
+	schedule.Name = resp.Name
+
+	if resp.State == schedulerpb.Job_ENABLED {
+		schedule.Status = "running"
+	} else {
+		schedule.Status = "stopped"
+	}
+
+	return schedule, nil
 }
 
 func HandleGetSchedules(resp http.ResponseWriter, request *http.Request) {
@@ -10085,8 +10144,28 @@ func GetSpecificWorkflow(resp http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	log.Printf("[INFO] Got new version of workflow %s (%s) for org %s and user %s (%s). Actions: %d, Triggers: %d", workflow.Name, workflow.ID, user.ActiveOrg.Id, user.Username, user.Id, len(workflow.Actions), len(workflow.Triggers))
+	//Check if workflow trigger schedule is in sync with the gcp cron job
+	if workflow.Triggers != nil {
 
+		for index, trigger := range workflow.Triggers {
+			if trigger.TriggerType == "SCHEDULE" {
+				//Check if the schedule is in sync with the gcp cron job
+				GcpSchedule, err := GetGcpSchedule(ctx, trigger.ID)
+				if err != nil {
+					log.Printf("[ERROR] Failed getting gcp schedule for trigger %s: %s", trigger.ID, err)
+					workflow.Triggers[index].Status = "stopped"
+				} else {
+					workflow.Triggers[index].Status = GcpSchedule.Status
+				}
+
+			}
+		}
+
+		SetWorkflow(ctx, *workflow, workflow.ID)
+
+	}
+
+	log.Printf("[INFO] Got new version of workflow %s (%s) for org %s and user %s (%s). Actions: %d, Triggers: %d", workflow.Name, workflow.ID, user.ActiveOrg.Id, user.Username, user.Id, len(workflow.Actions), len(workflow.Triggers))
 	body, err := json.Marshal(workflow)
 	if err != nil {
 		log.Printf("[WARNING] Failed workflow GET marshalling: %s", err)
