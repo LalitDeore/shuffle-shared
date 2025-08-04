@@ -493,12 +493,10 @@ func sendToNotificationWorkflow(ctx context.Context, notification Notification, 
 	}
 
 	executionUrl := fmt.Sprintf("%s/api/v1/workflows/%s/execute", backendUrl, workflowId)
-	//log.Printf("\n\n[DEBUG] Notification workflow: %s. APIKEY: %#v\n\n", executionUrl, userApikey)
 	client := GetExternalClient(executionUrl)
 
 	// Set timeout to 30 sec
-	client.Timeout = 30 * time.Second
-
+	client.Timeout = 10 * time.Second
 	req, err := http.NewRequest(
 		"POST",
 		executionUrl,
@@ -632,6 +630,12 @@ func CreateOrgNotification(ctx context.Context, title, description, referenceUrl
 	if len(orgId) == 0 {
 		log.Printf("[ERROR] No org ID provided to create notification '%s'", title)
 		return errors.New("No org ID provided")
+	}
+
+	// Since we use a static workflow name, this should be effective.
+	if strings.Contains(title, "Ops Dashboard Workflow") {
+		log.Printf("[INFO] Skipping create notification for health check workflow")
+		return errors.New("Health check workflow detected")
 	}
 
 	if project.Environment == "" {
@@ -845,7 +849,7 @@ func CreateOrgNotification(ctx context.Context, title, description, referenceUrl
 
 		selectedApikey := ""
 		for _, user := range filteredUsers {
-			if user.Role == "admin" && len(user.ApiKey) > 0 && len(selectedApikey) == 0 {
+			if user.Role == "admin" && len(selectedApikey) == 0 {
 				foundUser, err := GetUser(ctx, user.Id)
 				if err == nil && len(foundUser.ApiKey) > 0 {
 					selectedApikey = foundUser.ApiKey
@@ -857,6 +861,9 @@ func CreateOrgNotification(ctx context.Context, title, description, referenceUrl
 		if len(org.Defaults.NotificationWorkflow) > 0 {
 			if len(selectedApikey) == 0 {
 				log.Printf("[ERROR] Didn't find an apikey to use when sending notifications for org %s to workflow %s", org.Id, org.Defaults.NotificationWorkflow)
+				if debug {
+					log.Printf("\n\n\n")
+				}
 			}
 
 			workflow, err := GetWorkflow(ctx, org.Defaults.NotificationWorkflow)
@@ -944,18 +951,16 @@ func HandleCreateNotification(resp http.ResponseWriter, request *http.Request) {
 		}
 
 		if len(orgId) > 0 && len(environment) > 0 && len(apikey) > 0 {
-			log.Printf("[DEBUG] HANDLING ENVIRONMENT AUTH")
-
 			authHeaderParts := strings.Split(apikey, " ")
 			if len(authHeaderParts) != 2 {
-				log.Printf("[INFO] Invalid authorization header in create notification api")
+				log.Printf("[WARNING] Invalid authorization header in create notification api")
 				resp.WriteHeader(401)
 				resp.Write([]byte(`{"success": false}`))
 				return
 			}
 
 			if authHeaderParts[0] != "Bearer" {
-				log.Printf("[INFO] Invalid authorization header in create notification api")
+				log.Printf("[WARNING] Invalid authorization header in create notification api")
 				resp.WriteHeader(401)
 				resp.Write([]byte(`{"success": false}`))
 				return

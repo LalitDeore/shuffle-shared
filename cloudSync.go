@@ -2,20 +2,20 @@ package shuffle
 
 import (
 	"bytes"
-	"net/url"
 	"context"
-	"regexp"
-	"io"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"io/ioutil"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"time"
-	"path/filepath"
 
 	//"github.com/algolia/algoliasearch-client-go/v3/algolia/opt"
 	"github.com/algolia/algoliasearch-client-go/v3/algolia/search"
@@ -77,12 +77,8 @@ func executeCloudAction(action CloudSyncJob, apikey string) error {
 }
 
 func HandleAlgoliaAppSearch(ctx context.Context, appname string) (AlgoliaSearchApp, error) {
-	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
-	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
-	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
-		log.Printf("[WARNING] ALGOLIA_CLIENT or ALGOLIA_SECRET not defined")
-		return AlgoliaSearchApp{}, errors.New("Algolia keys not defined")
-	}
+
+	cacheTimer := int32(300)
 
 	normalizedAppName := strings.TrimSpace(strings.ToLower(strings.ReplaceAll(strings.ReplaceAll(appname, "_", " "), " ", "_")))
 	cacheKey := fmt.Sprintf("appsearch_%s", normalizedAppName)
@@ -95,36 +91,67 @@ func HandleAlgoliaAppSearch(ctx context.Context, appname string) (AlgoliaSearchA
 			if err == nil {
 				return cachedApp, nil
 			}
+
 			log.Printf("[ERROR] Failed unmarshalling cached app search data in Handle algolia app search: %s", err)
 		}
 	}
+
+	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
+	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
+
+	// Fallback to default Algolia keys
+	if len(algoliaSecret) == 0 {
+		algoliaClient = "JNSS5CFDZZ"
+		algoliaSecret = os.Getenv("ALGOLIA_PUBLICKEY")
+	}
+
+	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
+		log.Printf("[ERROR] ALGOLIA_CLIENT and ALGOLIA_SECRET/ALGOLIA_SECRET not defined (app discovery)")
+		return AlgoliaSearchApp{}, errors.New("Algolia keys not defined")
+	}
+
+	returnApp := AlgoliaSearchApp{}
 
 	algClient := search.NewClient(algoliaClient, algoliaSecret)
 	algoliaIndex := algClient.InitIndex("appsearch")
 	appname = strings.TrimSpace(strings.ToLower(strings.Replace(appname, "_", " ", -1)))
 	res, err := algoliaIndex.Search(appname)
 	if err != nil {
-		log.Printf("[WARNING] Failed searching Algolia: %s", err)
-		return AlgoliaSearchApp{}, err
+		log.Printf("[ERROR] Failed searching Algolia (%s): %s", appname, err)
+
+		appData, err := json.Marshal(returnApp)
+		if err == nil {
+			SetCache(ctx, cacheKey, appData, cacheTimer)
+		} else {
+			log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (3): %s", err)
+		}
+
+		return returnApp, err
 	}
 
 	var newRecords []AlgoliaSearchApp
 	err = res.UnmarshalHits(&newRecords)
 	if err != nil {
 		log.Printf("[WARNING] Failed unmarshaling from Algolia: %s", err)
-		return AlgoliaSearchApp{}, err
+		appData, err := json.Marshal(returnApp)
+		if err == nil {
+			SetCache(ctx, cacheKey, appData, cacheTimer)
+		} else {
+			log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (4): %s", err)
+		}
+
+		return returnApp, err
 	}
 
-	//log.Printf("[INFO] Algolia hits for '%s': %d", appname, len(newRecords))
 	for _, newRecord := range newRecords {
 		newApp := strings.TrimSpace(strings.ToLower(strings.Replace(newRecord.Name, "_", " ", -1)))
 		if newApp == appname || newRecord.ObjectID == appname {
 			//return newRecord.ObjectID, nil
 			appData, err := json.Marshal(newRecord)
 			if err == nil {
-				SetCache(ctx, cacheKey, appData, 30)
+				SetCache(ctx, cacheKey, appData, cacheTimer)
 			} else {
-				log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (1): %s", err)
+				log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (5): %s", err)
 			}
 
 			return newRecord, nil
@@ -137,16 +164,23 @@ func HandleAlgoliaAppSearch(ctx context.Context, appname string) (AlgoliaSearchA
 		if strings.Contains(newApp, appname) {
 			appData, err := json.Marshal(newRecord)
 			if err == nil {
-				SetCache(ctx, cacheKey, appData, 30)
+				SetCache(ctx, cacheKey, appData, cacheTimer)
 			} else {
-				log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (2): %s", err)
+				log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (6): %s", err)
 			}
 
 			return newRecord, nil
 		}
 	}
 
-	return AlgoliaSearchApp{}, nil
+	appData, err := json.Marshal(returnApp)
+	if err == nil {
+		SetCache(ctx, cacheKey, appData, cacheTimer)
+	} else {
+		log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (7): %s", err)
+	}
+
+	return returnApp, nil
 }
 
 func HandleAlgoliaWorkflowSearchByApp(ctx context.Context, appname string) ([]AlgoliaSearchWorkflow, error) {
@@ -220,8 +254,27 @@ func HandleAlgoliaWorkflowSearchByUser(ctx context.Context, userId string) ([]Al
 }
 
 func HandleAlgoliaAppSearchByUser(ctx context.Context, userId string) ([]AlgoliaSearchApp, error) {
+	cacheKey := fmt.Sprintf("appsearch_user_%s", userId)
+	cache, err := GetCache(ctx, cacheKey)
+	if err == nil {
+		if cacheData, ok := cache.([]byte); ok {
+			var cachedApp []AlgoliaSearchApp
+			err = json.Unmarshal(cacheData, &cachedApp)
+			if err == nil {
+				return cachedApp, nil
+			}
+
+			log.Printf("[ERROR] Failed unmarshalling cached app search data in Handle algolia app search for user (%s): %s", cacheKey, err)
+		}
+	}
+
 	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
 	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
+	if len(algoliaSecret) == 0 {
+		algoliaClient = "JNSS5CFDZZ"
+		algoliaSecret = os.Getenv("ALGOLIA_PUBLICKEY")
+	}
+
 	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
 		log.Printf("[WARNING] ALGOLIA_CLIENT or ALGOLIA_SECRET not defined")
 		return []AlgoliaSearchApp{}, errors.New("Algolia keys not defined")
@@ -230,30 +283,51 @@ func HandleAlgoliaAppSearchByUser(ctx context.Context, userId string) ([]Algolia
 	algClient := search.NewClient(algoliaClient, algoliaSecret)
 	algoliaIndex := algClient.InitIndex("appsearch")
 
+	returnApps := []AlgoliaSearchApp{}
 	appSearch := fmt.Sprintf("%s", userId)
 	res, err := algoliaIndex.Search(appSearch)
 	if err != nil {
-		log.Printf("[WARNING] Failed app searching Algolia for creators: %s", err)
-		return []AlgoliaSearchApp{}, err
+		log.Printf("[ERROR] Failed app searching Algolia for creators (%s): %s", appSearch, err)
+
+		appData, err := json.Marshal(returnApps)
+		if err == nil {
+			SetCache(ctx, cacheKey, appData, 30)
+		} else {
+			log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (8): %s", err)
+		}
+
+		return returnApps, err
 	}
 
 	var newRecords []AlgoliaSearchApp
 	err = res.UnmarshalHits(&newRecords)
 	if err != nil {
-		log.Printf("[WARNING] Failed unmarshaling from Algolia with app creators: %s", err)
-		return []AlgoliaSearchApp{}, err
-	}
-	//log.Printf("[INFO] Algolia hits for %s: %d", appSearch, len(newRecords))
+		log.Printf("[ERROR] Failed unmarshaling from Algolia with app creators: %s", err)
 
-	allRecords := []AlgoliaSearchApp{}
+		appData, err := json.Marshal(returnApps)
+		if err == nil {
+			SetCache(ctx, cacheKey, appData, 30)
+		} else {
+			log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (9): %s", err)
+		}
+
+		return returnApps, err
+	}
+
 	for _, newRecord := range newRecords {
 		newAppName := strings.TrimSpace(strings.Replace(newRecord.Name, "_", " ", -1))
 		newRecord.Name = newAppName
-		allRecords = append(allRecords, newRecord)
-
+		returnApps = append(returnApps, newRecord)
 	}
 
-	return allRecords, nil
+	appData, err := json.Marshal(returnApps)
+	if err == nil {
+		SetCache(ctx, cacheKey, appData, 30)
+	} else {
+		log.Printf("[ERROR] Failed to marshal Algolia result in handle aloglia search (10): %s", err)
+	}
+
+	return returnApps, nil
 }
 
 func HandleAlgoliaCreatorSearch(ctx context.Context, username string) (AlgoliaSearchCreator, error) {
@@ -292,7 +366,7 @@ func HandleAlgoliaCreatorSearch(ctx context.Context, username string) (AlgoliaSe
 	algoliaIndex := algClient.InitIndex("creators")
 	res, err := algoliaIndex.Search(username)
 	if err != nil {
-		log.Printf("[WARNING] Failed searching Algolia creators: %s", err)
+		log.Printf("[ERROR] Failed searching Algolia creators (%s): %s", username, err)
 		return searchCreator, err
 	}
 
@@ -319,7 +393,7 @@ func HandleAlgoliaCreatorSearch(ctx context.Context, username string) (AlgoliaSe
 			algoliaIndex := algClient.InitIndex("workflows")
 			res, err := algoliaIndex.Search(username)
 			if err != nil {
-				log.Printf("[WARNING] Failed searching Algolia creator workflow: %s", err)
+				log.Printf("[ERROR] Failed searching Algolia creator workflow (%s): %s", username, err)
 				return searchCreator, err
 			}
 
@@ -370,6 +444,64 @@ func HandleAlgoliaCreatorSearch(ctx context.Context, username string) (AlgoliaSe
 	return foundUser, nil
 }
 
+func HandleAlgoliaPartnerSearch(ctx context.Context, orgId string) (AlgoliaSearchPartner, error) {
+
+	cacheKey := fmt.Sprintf("algolia_partner_%s", orgId)
+	searchPartner := AlgoliaSearchPartner{}
+	cache, err := GetCache(ctx, cacheKey)
+	if err == nil {
+		cacheData := []byte(cache.([]uint8))
+		err = json.Unmarshal(cacheData, &searchPartner)
+		if err == nil {
+			return searchPartner, nil
+		}
+	}
+
+	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
+	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
+	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
+		log.Printf("[WARNING] ALGOLIA_CLIENT or ALGOLIA_SECRET not defined")
+		return AlgoliaSearchPartner{}, errors.New("Algolia keys not defined")
+	}
+
+	algClient := search.NewClient(algoliaClient, algoliaSecret)
+	algoliaIndex := algClient.InitIndex("partners")
+	res, err := algoliaIndex.Search(orgId)
+	if err != nil {
+		log.Printf("[WARNING] Failed searching Algolia partners: %s", err)
+		return AlgoliaSearchPartner{}, err
+	}
+
+	var newRecords []AlgoliaSearchPartner
+	err = res.UnmarshalHits(&newRecords)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshaling from Algolia partners: %s", err)
+		return AlgoliaSearchPartner{}, err
+	}
+
+	foundPartner := AlgoliaSearchPartner{}
+	for _, newRecord := range newRecords {
+		if newRecord.OrgId == orgId {
+			foundPartner = newRecord
+			break
+		}
+	}
+
+	if project.CacheDb {
+		data, err := json.Marshal(foundPartner)
+		if err != nil {
+			return foundPartner, nil
+		}
+
+		err = SetCache(ctx, cacheKey, data, 30)
+		if err != nil {
+			log.Printf("[WARNING] Failed updating algolia partner cache: %s", err)
+		}
+	}
+
+	return foundPartner, nil
+}
+
 func HandleAlgoliaCreatorUpload(ctx context.Context, user User, overwrite bool, isOrg bool) (string, error) {
 	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
 	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
@@ -382,7 +514,7 @@ func HandleAlgoliaCreatorUpload(ctx context.Context, user User, overwrite bool, 
 	algoliaIndex := algClient.InitIndex("creators")
 	res, err := algoliaIndex.Search(user.Id)
 	if err != nil {
-		log.Printf("[WARNING] Failed searching Algolia creators: %s", err)
+		log.Printf("[ERROR] Failed searching Algolia creators (%s): %s", user.Id, err)
 		return "", err
 	}
 
@@ -427,7 +559,7 @@ func HandleAlgoliaCreatorUpload(ctx context.Context, user User, overwrite bool, 
 	return user.Id, nil
 }
 
-func HandleAlgoliaCreatorDeletion(ctx context.Context, userId string) (error) {
+func HandleAlgoliaCreatorDeletion(ctx context.Context, userId string) error {
 	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
 	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
 	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
@@ -439,7 +571,7 @@ func HandleAlgoliaCreatorDeletion(ctx context.Context, userId string) (error) {
 	algoliaIndex := algClient.InitIndex("creators")
 	res, err := algoliaIndex.Search(userId)
 	if err != nil {
-		log.Printf("[WARNING] Failed searching Algolia creators: %s", err)
+		log.Printf("[ERROR] Failed searching Algolia creators (%s): %s", userId, err)
 		return err
 	}
 
@@ -459,15 +591,125 @@ func HandleAlgoliaCreatorDeletion(ctx context.Context, userId string) (error) {
 		}
 	}
 
-	// Should delete it? 
+	// Should delete it?
 	if len(foundItem.ObjectID) > 0 {
 		_, err = algoliaIndex.DeleteObject(foundItem.ObjectID)
 		if err != nil {
 			log.Printf("[WARNING] Algolia Creator delete problem: %s", err)
 			return err
-		} 
+		}
 
 		log.Printf("[INFO] Successfully removed creator %s with ID %s FROM ALGOLIA!", foundItem.Username, userId)
+	}
+
+	return nil
+}
+
+// Usecase Algolia Upload
+func HandleAlgoliaUsecaseUpload(ctx context.Context, usecase UsecaseInfo, overwrite bool) (string, error) {
+	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
+	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
+	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
+		log.Printf("[WARNING] ALGOLIA_CLIENT or ALGOLIA_SECRET not defined")
+		return "", errors.New("Algolia keys not defined")
+	}
+
+	algClient := search.NewClient(algoliaClient, algoliaSecret)
+	algoliaIndex := algClient.InitIndex("usecases")
+	res, err := algoliaIndex.Search(usecase.Id)
+	if err != nil {
+		log.Printf("[WARNING] Failed searching Algolia usecases: %s", err)
+		return "", err
+	}
+
+	var newRecords []AlgoliaSearchUsecase
+	err = res.UnmarshalHits(&newRecords)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshaling from Algolia partners: %s", err)
+		return "", err
+	}
+
+	//log.Printf("RECORDS: %d", len(newRecords))
+	for _, newRecord := range newRecords {
+		if newRecord.ObjectID == usecase.Id {
+			log.Printf("[INFO] Object %s already exists in Algolia", usecase.Id)
+
+			if overwrite {
+				break
+			} else {
+				return usecase.Id, errors.New("Usecase ID already exists!")
+			}
+		}
+	}
+
+	timeNow := int64(time.Now().Unix())
+	records := []AlgoliaSearchUsecase{
+		AlgoliaSearchUsecase{
+			ObjectID:           usecase.Id,
+			PartnerName:        usecase.CompanyInfo.Name,
+			PartnerId:          usecase.CompanyInfo.Id,
+			Name:               usecase.MainContent.Title,
+			Description:        usecase.MainContent.Description,
+			Categories:         usecase.MainContent.Categories,
+			SourceAppType:      usecase.MainContent.SourceAppType,
+			DestinationAppType: usecase.MainContent.DestinationAppType,
+			PublicWorkflowID:   usecase.MainContent.PublicWorkflowID,
+			TimeEdited:         timeNow,
+		},
+	}
+
+	_, err = algoliaIndex.SaveObjects(records)
+	if err != nil {
+		log.Printf("[WARNING] Algolia Object put err: %s", err)
+		return "", err
+	}
+
+	log.Printf("[INFO] SUCCESSFULLY UPLOADED partner %s with ID %s TO ALGOLIA!", usecase.MainContent.Title, usecase.Id)
+	return usecase.Id, nil
+}
+
+// Usecase deletion
+func HandleAlgoliaUsecaseDeletion(ctx context.Context, usecaseId string) error {
+	algoliaClient := os.Getenv("ALGOLIA_CLIENT")
+	algoliaSecret := os.Getenv("ALGOLIA_SECRET")
+	if len(algoliaClient) == 0 || len(algoliaSecret) == 0 {
+		log.Printf("[WARNING] ALGOLIA_CLIENT or ALGOLIA_SECRET not defined")
+		return errors.New("Algolia keys not defined")
+	}
+
+	algClient := search.NewClient(algoliaClient, algoliaSecret)
+	algoliaIndex := algClient.InitIndex("usecases")
+	res, err := algoliaIndex.Search(usecaseId)
+	if err != nil {
+		log.Printf("[ERROR] Failed searching Algolia usecases (%s): %s", usecaseId, err)
+		return err
+	}
+
+	var newRecords []AlgoliaSearchUsecase
+	err = res.UnmarshalHits(&newRecords)
+	if err != nil {
+		log.Printf("[WARNING] Failed unmarshaling from Algolia usecases: %s", err)
+		return err
+	}
+
+	//log.Printf("RECORDS: %d", len(newRecords))
+	foundItem := AlgoliaSearchUsecase{}
+	for _, newRecord := range newRecords {
+		if newRecord.ObjectID == usecaseId {
+			foundItem = newRecord
+			break
+		}
+	}
+
+	// Should delete it?
+	if len(foundItem.ObjectID) > 0 {
+		_, err = algoliaIndex.DeleteObject(foundItem.ObjectID)
+		if err != nil {
+			log.Printf("[WARNING] Algolia Usecase delete problem: %s", err)
+			return err
+		}
+
+		log.Printf("[INFO] Successfully removed usecase %s with ID %s FROM ALGOLIA!", foundItem.Name, usecaseId)
 	}
 
 	return nil
@@ -522,7 +764,7 @@ func handleAlgoliaWorkflowUpdate(ctx context.Context, workflow Workflow) (string
 	//res, err := algoliaIndex.Search("%s", api.ID)
 	res, err := algoliaIndex.Search(workflow.ID)
 	if err != nil {
-		log.Printf("[WARNING] Failed searching Algolia: %s", err)
+		log.Printf("[ERROR] Failed searching Algolia (%s): %s", workflow.ID, err)
 		return "", err
 	}
 
@@ -630,97 +872,76 @@ func ValidateExecutionUsage(ctx context.Context, orgId string) (*Org, error) {
 		return org, errors.New(fmt.Sprintf("Failed getting the organization %s: %s", orgId, err))
 	}
 
-	// Allows parent & childorgs to run as much as they want. No limitations
-	if len(org.ChildOrgs) > 0 || len(org.ManagerOrgs) > 0 {
-		// log.Printf("[DEBUG] Execution for org '%s' (%s) is allowed due to being a child-or parent org. This is only accessible to customers. We're not force-stopping them.", org.Name, org.Id)
+	orgStats, err := GetOrgStatistics(ctx, orgId)
+	if err != nil {
+		log.Printf("[WARNING] Failed getting org statistics for %s (%s): %s", org.Name, org.Id, err)
 		return org, nil
 	}
 
+	if org.Billing.AppRunsHardLimit > 0 && orgStats.MonthlyAppExecutions > org.Billing.AppRunsHardLimit {
+		log.Printf("[WARNING] Org %s (%s) has exceeded the app runs hard limit (%d/%d)", org.Name, org.Id, orgStats.MonthlyAppExecutions, org.Billing.AppRunsHardLimit)
 
-	info, err := GetOrgStatistics(ctx, orgId)
-	if err == nil {
-		// log.Printf("[DEBUG] Found executions for org %s (%s): %d", org.Name, org.Id, info.MonthlyAppExecutions)
-		org.SyncFeatures.AppExecutions.Usage = info.MonthlyAppExecutions
-		if org.SyncFeatures.AppExecutions.Limit <= 10000 {
-			org.SyncFeatures.AppExecutions.Limit = 10000
-		} else {
-			// FIXME: Not strictly enforcing other limits yet
-			// Should just warn our team about them going over
-			org.SyncFeatures.AppExecutions.Limit = 15000000000
+		return org, errors.New(fmt.Sprintf("Org %s (%s) has exceeded the app runs hard limit (%d/%d)", org.Name, org.Id, orgStats.MonthlyAppExecutions, org.Billing.AppRunsHardLimit))
+	}
+
+	validationOrg := org
+	validationOrgStats := orgStats
+
+	if len(org.CreatorOrg) > 0 {
+		validationOrg, err = GetOrg(ctx, org.CreatorOrg)
+		if err != nil {
+			log.Printf("[WARNING] Failed getting creator org %s (%s): %s ", validationOrg.Name, validationOrg.Id, err)
+			//return org, errors.New(fmt.Sprintf("Failed getting the creator organization %s: %s", org.CreatorOrg, err))
+			return org, nil
+		}
+		validationOrgStats, err = GetOrgStatistics(ctx, org.CreatorOrg)
+		if err != nil {
+			log.Printf("[WARNING] Failed getting creator org statistics for %s (%s): %s ", validationOrg.Name, validationOrg.Id, err)
+			//return org, errors.New(fmt.Sprintf("Failed getting the creator organization statistics %s: %s", validationOrg.CreatorOrg, err))
+			return org, nil
 		}
 
-		//log.Printf("[DEBUG] Org %s (%s) has values: org.LeadInfo.POV: %v, org.LeadInfo.Internal: %v", org.Name, org.Id, org.LeadInfo.POV, org.LeadInfo.Internal) 
-
-		// FIXME: When inside this, check if usage should be sent to the user
-		// if (org.SyncFeatures.AppExecutions.Usage > org.SyncFeatures.AppExecutions.Limit) && !(org.LeadInfo.POV || org.LeadInfo.Internal) {
-		if (org.SyncFeatures.AppExecutions.Usage > org.SyncFeatures.AppExecutions.Limit) && !(org.LeadInfo.POV) {
-			return org, errors.New(fmt.Sprintf("You are above your limited usage of app executions this month (%d / %d) when running with triggers. Contact support@shuffler.io or the live chat to extend this for org %s (%s)", org.SyncFeatures.AppExecutions.Usage, org.SyncFeatures.AppExecutions.Limit, org.Name, org.Id))
-		}
-
-		return org, nil
-	} else {
-		//log.Printf("[WARNING] Failed finding executions for org %s (%s)", org.Name, org.Id)
+		log.Printf("[INFO] Using creator org %s (%s) for org %s (%s)", validationOrg.Name, validationOrg.Id, org.CreatorOrg, org.Id)
 	}
 
-	return org, nil
-}
-
-func RunActionAI(resp http.ResponseWriter, request *http.Request) {
-	cors := HandleCors(resp, request)
-	if cors {
-		return
+	// Allows partners and POV users to run workflows without limits
+	if validationOrg.LeadInfo.POV || validationOrg.LeadInfo.Internal || validationOrg.LeadInfo.IntegrationPartner || validationOrg.LeadInfo.TechPartner || validationOrg.LeadInfo.DistributionPartner || validationOrg.LeadInfo.ServicePartner {
+		return validationOrg, nil
 	}
 
-	user, err := HandleApiAuthentication(resp, request)
-	if err != nil {
-		log.Printf("[AUDIT] Api authentication failed in get action AI: %s", err)
-		resp.WriteHeader(401)
-		resp.Write([]byte(`{"success": false}`))
-		return
+	// If enterprise customer then don't block them
+	if validationOrg.LeadInfo.Customer && validationOrg.SyncFeatures.AppExecutions.Limit >= 300000 {
+		return validationOrg, nil
 	}
 
-	ctx := GetContext(request)
-	org, err := GetOrg(ctx, user.ActiveOrg.Id)
-	if err != nil {
-		resp.WriteHeader(http.StatusInternalServerError)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed getting the organization`)))
-		return
+	totalAppExecutions := validationOrgStats.MonthlyAppExecutions + validationOrgStats.MonthlyChildAppExecutions
+
+	if totalAppExecutions >= validationOrg.SyncFeatures.AppExecutions.Limit {
+		log.Printf("[WARNING] Org %s (%s) has exceeded the monthly app executions limit (%d/%d)", validationOrg.Name, validationOrg.Id, totalAppExecutions, validationOrg.SyncFeatures.AppExecutions.Limit)
+		return validationOrg, errors.New(fmt.Sprintf("Org %s (%s) has exceeded the monthly app executions limit (%d/%d)", validationOrg.Name, validationOrg.Id, totalAppExecutions, validationOrg.SyncFeatures.AppExecutions.Limit))
 	}
 
-	log.Printf("[DEBUG] Running action AI for org %s (%s). Cloud sync: %#v and %#v", org.Name, org.Id, org.CloudSyncActive, org.CloudSync)
-	if !org.CloudSync {
-		resp.WriteHeader(http.StatusInternalServerError)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Cloud sync is not active for this organization"}`)))
-		return
+	if debug {
+		log.Printf("[INFO] Org %s (%s) has %d/%d app executions this month", validationOrg.Name, validationOrg.Id, totalAppExecutions, validationOrg.SyncFeatures.AppExecutions.Limit)
 	}
 
-	// For now, just redirecting
-	log.Printf("[DEBUG] Redirecting Action AI request to main site handler (shuffler.io)")
-
-	// Add api-key from the org sync
-	if org.SyncConfig.Apikey != "" {
-		request.Header.Add("Authorization", fmt.Sprintf("Bearer %s", org.SyncConfig.Apikey))
-
-		// Remove cookie header after checking if it exists
-		if request.Header.Get("Cookie") != "" {
-			request.Header.Del("Cookie")
-		}
-	}
-
-	RedirectUserRequest(resp, request)
-	return
+	return validationOrg, nil
 }
 
 func RedirectUserRequest(w http.ResponseWriter, req *http.Request) {
+	if project.Environment == "cloud" && gceProject == "shuffler" {
+		log.Printf("[ERROR] Recursive RedirectRequest for %s", req.RequestURI)
+		w.WriteHeader(400)
+		w.Write([]byte(`{"success": false, "reason": "Recursive redirect request detected"}`))
+		return
+	}
+
 	proxyScheme := "https"
 	proxyHost := fmt.Sprintf("shuffler.io")
-
 	httpClient := &http.Client{
 		Timeout: 120 * time.Second,
 	}
 
-	//fmt.Fprint(resp, "OK")
-	//http.Redirect(resp, request, "https://europe-west2-shuffler.cloudfunctions.net/ShuffleSSR", 303)
 	body, err := ioutil.ReadAll(req.Body)
 	if err != nil {
 		log.Printf("[ERROR] Issue in SSR body proxy: %s", err)
@@ -730,7 +951,10 @@ func RedirectUserRequest(w http.ResponseWriter, req *http.Request) {
 
 	//req.Body = ioutil.NopCloser(bytes.NewReader(body))
 	url := fmt.Sprintf("%s://%s%s", proxyScheme, proxyHost, req.RequestURI)
-	//log.Printf("[DEBUG] Request (%s) request URL: %s. More: %s", req.Method, url, req.URL.String())
+
+	if debug {
+		log.Printf("[DEBUG] Request (%s) request URL: %s. More: %s", req.Method, url, req.URL.String())
+	}
 
 	proxyReq, err := http.NewRequest(req.Method, url, bytes.NewReader(body))
 	if err != nil {
@@ -773,13 +997,14 @@ func RedirectUserRequest(w http.ResponseWriter, req *http.Request) {
 	// Need to clear cache in case user gets updated in db
 	// with a new session and such. This only forces a new search,
 	// and shouldn't get them logged out
-	ctx := GetContext(req)
 	c, err := req.Cookie("session_token")
 	if err != nil {
 		c, err = req.Cookie("__session")
 	}
 
+	// FIXME: What is the point of this cookie checking?
 	if err == nil {
+		ctx := GetContext(req)
 		DeleteCache(ctx, fmt.Sprintf("session_%s", c.Value))
 	}
 }
@@ -823,7 +1048,7 @@ func CheckCreatorSelfPermission(ctx context.Context, requestUser, creatorUser Us
 		}
 	}
 
-	return false 
+	return false
 }
 
 // Uploads updates for a workflow to a specific file on git
@@ -836,12 +1061,12 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 		org.Defaults.WorkflowUploadUsername = workflow.BackupConfig.UploadUsername
 		org.Defaults.WorkflowUploadToken = workflow.BackupConfig.UploadToken
 
-		// FIXME: Decrypt here 
+		// FIXME: Decrypt here
 		if workflow.BackupConfig.TokensEncrypted {
-			log.Printf("[DEBUG] Should realtime decrypt token for org %s (%s)", org.Name, org.Id) 
+			log.Printf("[DEBUG] Should realtime decrypt token for org %s (%s)", org.Name, org.Id)
 			org.Defaults.TokensEncrypted = true
 		} else {
-			org.Defaults.TokensEncrypted = false 
+			org.Defaults.TokensEncrypted = false
 		}
 	}
 
@@ -887,7 +1112,6 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 		org.Defaults.WorkflowUploadBranch = "master"
 	}
 
-
 	if org.Defaults.WorkflowUploadRepo == "" || org.Defaults.WorkflowUploadToken == "" {
 		//log.Printf("[DEBUG] Missing Repo/Token during Workflow backup upload for org %s (%s)", org.Name, org.Id)
 		//return errors.New("Missing repo or token")
@@ -921,7 +1145,7 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 	// remove github backup info
 	workflow.BackupConfig = BackupConfig{}
 
-	// Use git to upload the workflow. 
+	// Use git to upload the workflow.
 	workflowData, err := json.MarshalIndent(workflow, "", "  ")
 	if err != nil {
 		log.Printf("[ERROR] Failed marshalling workflow %s (%s) for git upload: %s", workflow.Name, workflow.ID, err)
@@ -945,7 +1169,7 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 
 	// Specify the file path within the repository
 	repo, err := git.Clone(memory.NewStorage(), fs, &git.CloneOptions{
-    	URL: location,
+		URL: location,
 	})
 	if err != nil {
 		newErr := strings.ReplaceAll(err.Error(), org.Defaults.WorkflowUploadToken, "****")
@@ -953,7 +1177,7 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 
 		log.Printf("[ERROR] Error cloning repo '%s' (workflow backup): %s", newRepoName, newErr)
 		return err
-	} 
+	}
 
 	// Initialize a new Git repository in memory
 	w := &git.Worktree{}
@@ -1022,8 +1246,6 @@ func SetGitWorkflow(ctx context.Context, workflow Workflow, org *Org) error {
 
 	log.Printf("[DEBUG] File uploaded successfully to '%s'!", newRepoName)
 
-
-
 	return nil
 }
 
@@ -1077,7 +1299,6 @@ func CreateFs(basepath, pathname string) (billy.Filesystem, error) {
 	return fs, err
 }
 
-
 func loadAppConfigFromMain(fileId string) {
 	// Send request to /api/v1/apps/{fileId}/config
 	// Parse out the config and add it to the database
@@ -1094,8 +1315,8 @@ func loadAppConfigFromMain(fileId string) {
 	appApi := fmt.Sprintf("%s/api/v1/apps/%s/config", backendHost, fileId)
 	client := &http.Client{}
 	req, err := http.NewRequest(
-		"GET", 
-		appApi, 
+		"GET",
+		appApi,
 		nil,
 	)
 
@@ -1241,7 +1462,7 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 	location := strings.Split(request.URL.String(), "/")
 	var fileId string
 	activate := true
-	shouldDistributeToLocation := false 
+	shouldDistributeToLocation := false
 	if location[1] == "api" {
 		if len(location) <= 4 {
 			resp.WriteHeader(401)
@@ -1292,7 +1513,6 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 			app = &selectedApp
 		} else {
 			log.Printf("[WARNING] Error getting app with ID %s (app config): %s", fileId, err)
-
 
 			// Automatic propagation to cloud regions
 			if project.Environment == "cloud" && gceProject != "shuffler" {
@@ -1359,9 +1579,30 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	distributingApp := false
+	if !app.Public && app.ReferenceOrg != user.ActiveOrg.Id && user.ActiveOrg.Role == "admin" {
+		if app.Owner == user.Id {
+			log.Printf("[INFO] App %s (%s) is owned by the user %s (%s). Distributing it to the org %s (%s)", app.Name, app.ID, user.Username, user.Id, user.ActiveOrg.Name, user.ActiveOrg.Id)
+			distributingApp = true
+		} else {
+			// check if the app belongs to parent org
+			org, err := GetOrg(ctx, user.ActiveOrg.Id)
+			if err != nil {
+				log.Printf("[ERROR] Failed getting org %s (%s): %s", user.ActiveOrg.Name, user.ActiveOrg.Id, err)
+				resp.WriteHeader(500)
+				resp.Write([]byte(`{"success": false, "reason": "Failed getting org"}`))
+				return
+			}
+			if org.CreatorOrg == app.ReferenceOrg {
+				log.Printf("[INFO] App %s (%s) is owned by the parent org %s (%s). Distributing it to the suborg %s (%s)", app.Name, app.ID, org.Name, org.Id, user.ActiveOrg.Name, user.ActiveOrg.Id)
+				distributingApp = true
+			}
+		}
+	}
+
 	org := &Org{}
 	added := false
-	if app.Sharing || app.Public || !activate {
+	if app.Sharing || app.Public || !activate || distributingApp {
 		org, err = GetOrg(ctx, user.ActiveOrg.Id)
 		if err == nil {
 			if len(org.ActiveApps) > 150 {
@@ -1386,7 +1627,14 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 				if !ArrayContains(org.ActiveApps, app.ID) {
 					org.ActiveApps = append(org.ActiveApps, app.ID)
 					added = true
+				} else if ArrayContains(org.ActiveApps, app.ID) && !app.Public {
+					// If the app is already in the org, we don't need to add it again
+					log.Printf("[DEBUG] App %s (%s) already exists in org %s (%s). Not adding again.", app.Name, app.ID, user.ActiveOrg.Name, user.ActiveOrg.Id)
+					resp.WriteHeader(200)
+					resp.Write([]byte(`{"success": true, "reason": "App already exists in org"}`))
+					return
 				}
+
 			} else {
 				// Remove from the array
 				newActiveApps := []string{}
@@ -1468,10 +1716,9 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 			return
 		}
 
-
 		appName := fmt.Sprintf("%s_%s", strings.ToLower(strings.ReplaceAll(app.Name, " ", "-")), app.AppVersion)
 		if project.Environment == "cloud" {
-			if app.Public == true { 
+			if app.Public == true {
 			} else {
 				appName = fmt.Sprintf("%s_%s", strings.ToLower(strings.ReplaceAll(app.Name, " ", "-")), app.ID)
 			}
@@ -1493,7 +1740,6 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 				continue
 			}
 		}
-
 
 		resp.WriteHeader(200)
 		resp.Write([]byte(`{"success": true, "reason": "Re-download request sent to all relevant environments"}`))
@@ -1520,8 +1766,14 @@ func ActivateWorkflowApp(resp http.ResponseWriter, request *http.Request) {
 		RedirectUserRequest(resp, request)
 	}
 
+	reason := "App Activated"
+
+	if !activate {
+		reason = "App Deactivated"
+	}
+
 	resp.WriteHeader(200)
-	resp.Write([]byte(`{"success": true}`))
+	resp.Write([]byte(`{"success": true,"reason": "` + reason + `"}`))
 }
 
 // For replicating HTTP request from schedule user
@@ -1547,7 +1799,7 @@ func HandleSuborgScheduleRun(request *http.Request, workflow *Workflow) {
 
 	// 1. Get child workflows of workflow
 	// 2. Map to the right ones
-	childWorkflows, err := ListChildWorkflows(ctx, workflow.ID) 
+	childWorkflows, err := ListChildWorkflows(ctx, workflow.ID)
 	if err != nil {
 		log.Printf("[ERROR] Failed getting child workflows for parent workflow %s: %s", workflow.ID, err)
 		return
@@ -1564,7 +1816,7 @@ func HandleSuborgScheduleRun(request *http.Request, workflow *Workflow) {
 		}
 
 		// Check if the OrgId is still in the workflow.Sub
-		found := false 
+		found := false
 		for _, suborg := range workflow.SuborgDistribution {
 			if childWorkflow.OrgId == suborg {
 				found = true
@@ -1626,7 +1878,7 @@ func HandleSuborgScheduleRun(request *http.Request, workflow *Workflow) {
 			newresp, err := client.Do(req)
 			if err != nil {
 				log.Printf("[ERROR] Failed running child workflow schedule: %s", err)
-				return 
+				return
 			}
 
 			defer newresp.Body.Close()
@@ -1646,87 +1898,6 @@ func HandleSuborgScheduleRun(request *http.Request, workflow *Workflow) {
 	}
 }
 
-// Fixes potential decision return or reference problems: 
-// {{list_tickets}} -> $list_tickets
-// {{list_tickets[0].description}} -> $list_tickets.#0.description
-// {{ticket.description}} -> $ticket.description
-func TranslateBadFieldFormats(fields []Valuereplace) []Valuereplace {
-	for fieldIndex, _ := range fields {
-		field := fields[fieldIndex]
-		if !strings.Contains(field.Value, "{{") || !strings.Contains(field.Value, "}}") {
-			continue
-		}
-
-		field.Value = strings.ReplaceAll(field.Value, `{{list_tickets[0].summary}}`, `{{ list_tickets[].summary }}`)
-
-		// Regex match {{list_tickets[0].description}} and {{ list_tickets[].description }} and {{ list_tickets[:] }}
-		//re := regexp.MustCompile(`{{\s*([a-zA-Z0-9_]+)(\[[0-9]+\])?(\.[a-zA-Z0-9_]+)?\s*}}`)
-		re := regexp.MustCompile(`{{\s*([a-zA-Z0-9_]+)(\[[0-9]*\])?(\.[a-zA-Z0-9_]+)?\s*}}`)
-		matches := re.FindAllStringSubmatch(field.Value, -1)
-		if len(matches) == 0 {
-			continue
-		}
-
-		stringBuild := "$"
-		for _, match := range matches {
-			for i, matchValue := range match {
-				if i == 0 {
-					continue
-				}
-
-				if i != 1 {
-					if !strings.HasPrefix(matchValue, ".") {
-						stringBuild += "."
-					}
-				}
-
-				if strings.HasPrefix(matchValue, "[") && strings.HasSuffix(matchValue, "]") {
-					// Find the formats:
-					// [] -> #
-					// [:] -> #
-					// [0] -> #0
-					// [0:1] -> #0-1
-					// [0:] -> #0-max
-					if matchValue == "[]" || matchValue == "[:]" {
-						stringBuild += "#"
-					} else if strings.Contains(matchValue, ":") {
-						parts := strings.Split(matchValue, ":")
-						if len(parts) == 2 {
-							stringBuild += fmt.Sprintf("#%s-%s", parts[0], parts[1])
-						} else {
-							stringBuild += fmt.Sprintf("#%s-max", parts[0])
-						}
-
-						stringBuild += fmt.Sprintf("#%s", matchValue)
-					} else {
-						// Remove the brackets
-						matchValue = strings.ReplaceAll(matchValue, "[", "")
-						matchValue = strings.ReplaceAll(matchValue, "]", "")
-						stringBuild += fmt.Sprintf("#%s", matchValue)
-					}
-
-					continue
-				}
-
-				stringBuild += matchValue
-			}
-
-
-			if len(match) > 1 {
-				field.Value = strings.ReplaceAll(field.Value, match[0], stringBuild)
-				fields[fieldIndex].Value = field.Value
-				log.Printf("VALUE: %#v", field.Value)
-			}
-
-			stringBuild = "$"
-		}
-	}
-		
-	os.Exit(3)
-
-	return fields
-}
-
 // This is JUST for Singul actions with AI agents.
 // As AI Agents can have multiple types of runs, this could change every time.
 func RunAgentDecisionSingulActionHandler(execution WorkflowExecution, decision AgentDecision) ([]byte, string, error) {
@@ -1744,19 +1915,18 @@ func RunAgentDecisionSingulActionHandler(execution WorkflowExecution, decision A
 
 	url := fmt.Sprintf("%s/api/v1/apps/categories/run?authorization=%s&execution_id=%s", baseUrl, execution.Authorization, execution.ExecutionId)
 
-
 	// Change timeout to be 30 seconds (just in case)
 	client := GetExternalClient(url)
 	client.Timeout = 60 * time.Second
 
 	parsedFields := TranslateBadFieldFormats(decision.Fields)
 	parsedAction := CategoryAction{
-		AppName: 	decision.Tool,
-		Label: 		decision.Action,
+		AppName: decision.Tool,
+		Label:   decision.Action,
 
 		Fields: parsedFields,
 
-		SkipWorkflow: true, 
+		SkipWorkflow: true,
 	}
 
 	marshalledAction, err := json.Marshal(parsedAction)
@@ -1789,14 +1959,14 @@ func RunAgentDecisionSingulActionHandler(execution WorkflowExecution, decision A
 		}
 
 		/*
-		if !strings.HasPrefix(key, "X-") {
-			continue
-		}
+			if !strings.HasPrefix(key, "X-") {
+				continue
+			}
 
-		// Don't care about raw response
-		if key == "X-Raw-Response-Url" || key == "X-Apprun-Url" {
-			continue
-		}
+			// Don't care about raw response
+			if key == "X-Raw-Response-Url" || key == "X-Apprun-Url" {
+				continue
+			}
 		*/
 
 		foundValue := ""
@@ -1807,12 +1977,12 @@ func RunAgentDecisionSingulActionHandler(execution WorkflowExecution, decision A
 			}
 		}
 
-		debugUrl = foundValue 
+		debugUrl = foundValue
 		/*
-		returnHeaders = append(returnHeaders, Valuereplace{
-			Key: key,
-			Value: foundValue, 
-		})
+			returnHeaders = append(returnHeaders, Valuereplace{
+				Key: key,
+				Value: foundValue,
+			})
 		*/
 	}
 
@@ -1860,26 +2030,23 @@ func RunAgentDecisionSingulActionHandler(execution WorkflowExecution, decision A
 		return originalBody, debugUrl, errors.New("Failed running agent decision. Success false for Singul action")
 	}
 
-
 	/*
-	agentOutput.Decisions[decisionIndex].RunDetails.RawResponse = string(rawResponse)
-	agentOutput.Decisions[decisionIndex].RunDetails.DebugUrl = debugUrl 
-	if err != nil {
-		log.Printf("[ERROR] Failed to run agent decision %#v: %s", decision, err)
-		agentOutput.Decisions[decisionIndex].RunDetails.Status = "FAILED"
+		agentOutput.Decisions[decisionIndex].RunDetails.RawResponse = string(rawResponse)
+		agentOutput.Decisions[decisionIndex].RunDetails.DebugUrl = debugUrl
+		if err != nil {
+			log.Printf("[ERROR] Failed to run agent decision %#v: %s", decision, err)
+			agentOutput.Decisions[decisionIndex].RunDetails.Status = "FAILED"
 
-		resultMapping.Status = "FAILURE"
-		resultMapping.CompletedAt = time.Now().Unix()
-		agentOutput.CompletedAt = time.Now().Unix()
-	} else {
-		agentOutput.Decisions[decisionIndex].RunDetails.Status = "RUNNING"
-	}
+			resultMapping.Status = "FAILURE"
+			resultMapping.CompletedAt = time.Now().Unix()
+			agentOutput.CompletedAt = time.Now().Unix()
+		} else {
+			agentOutput.Decisions[decisionIndex].RunDetails.Status = "RUNNING"
+		}
 	*/
-
 
 	return body, debugUrl, nil
 }
-
 
 // Runs an Agent Decision -> returns the result from it
 // FIXME: Handle types: https://www.figma.com/board/V6Kg7KxbmuhIUyTImb20t1/Shuffle-AI-Agent-system?node-id=0-1&p=f&t=yIGaSXQYsYReR8cI-0
@@ -1898,8 +2065,8 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 		cacheData := []byte(cache.([]uint8))
 		err = json.Unmarshal(cacheData, &foundDecision)
 		if err != nil {
-			log.Printf("[WARNING][%s] Failed agent decision unmarshal (not critical): %s", execution.ExecutionId, err) 
-		} 
+			log.Printf("[WARNING][%s] Failed agent decision unmarshal (not critical): %s", execution.ExecutionId, err)
+		}
 
 		if foundDecision.RunDetails.StartedAt > 0 {
 			log.Printf("[DEBUG][%s] Decision %s already has status '%s'. Returning as it's already started..", execution.ExecutionId, decision.RunDetails.Id, foundDecision.RunDetails.Status)
@@ -1920,10 +2087,9 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 
 	go SetCache(ctx, decisionId, marshalledDecision, 60)
 
-
-	rawResponse, debugUrl, err := RunAgentDecisionSingulActionHandler(execution, decision) 
+	rawResponse, debugUrl, err := RunAgentDecisionSingulActionHandler(execution, decision)
 	decision.RunDetails.RawResponse = string(rawResponse)
-	decision.RunDetails.DebugUrl = debugUrl 
+	decision.RunDetails.DebugUrl = debugUrl
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed to run agent decision %#v: %s", execution.ExecutionId, decision, err)
 		decision.RunDetails.Status = "FAILURE"
@@ -1935,10 +2101,9 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 		decision.RunDetails.Status = "FINISHED"
 	}
 
-
 	// 1. Send this back as a result for an action
 	// Then the action itself should decide if it's done or not.
-	// Would it work to send JUST this decision result? 
+	// Would it work to send JUST this decision result?
 	// This could start the next step(s) automatically?
 	decision.RunDetails.CompletedAt = time.Now().Unix()
 	marshalledDecision, err = json.Marshal(decision)
@@ -1949,11 +2114,10 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 	go SetCache(ctx, decisionId, marshalledDecision, 60)
 
 	// 1. Send an /api/v1/streams request? Due to concurrency, I think this is the only way (?)
-	// 2. On the streams API, make sure to: 
-	//     1. Check if the execution(s) are finished 
+	// 2. On the streams API, make sure to:
+	//     1. Check if the execution(s) are finished
 	//     2. Send the result through AI again to check if it changes (?). Should there be a verdict here?
 	//     3: Start the next steps of decisions after updates
-
 
 	baseUrl := "https://shuffler.io"
 	if os.Getenv("BASE_URL") != "" {
@@ -1973,14 +2137,14 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 	client := GetExternalClient(url)
 
 	parsedAction := ActionResult{
-		ExecutionId: 	execution.ExecutionId,
-		Authorization: 	execution.Authorization,
+		ExecutionId:   execution.ExecutionId,
+		Authorization: execution.Authorization,
 
 		// Map in the node ID (action ID) and decision ID to set/continue the right result
 		Action: Action{
 			AppName: "AI Agent",
-			Label: fmt.Sprintf("Agent Decision %s", decision.RunDetails.Id),
-			ID: agentOutput.NodeId,
+			Label:   fmt.Sprintf("Agent Decision %s", decision.RunDetails.Id),
+			ID:      agentOutput.NodeId,
 		},
 		Status: fmt.Sprintf("agent_%s", decision.RunDetails.Id),
 		Result: string(marshalledDecision),
@@ -1989,7 +2153,7 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 	marshalledAction, err := json.Marshal(parsedAction)
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed marshalling action in agent decision: %s", execution.ExecutionId, err)
-		return 
+		return
 	}
 
 	req, err := http.NewRequest(
@@ -2000,23 +2164,223 @@ func RunAgentDecisionAction(execution WorkflowExecution, agentOutput AgentOutput
 
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed agent decision request creation: %s", execution.ExecutionId, err)
-		return 
+		return
 	}
 
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := client.Do(req)
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed sending agent decision result: %s", execution.ExecutionId, err)
-		return 
+		return
 	}
 
 	foundBody, err := ioutil.ReadAll(resp.Body)
 	if err != nil {
 		log.Printf("[ERROR][%s] Failed reading body from agent decision: %s", execution.ExecutionId, err)
-		return 
+		return
 	}
 
 	if resp.StatusCode != 200 {
 		log.Printf("[ERROR][%s] Status %d for decision %s. Body: %s", execution.ExecutionId, resp.StatusCode, decision.RunDetails.Id, string(foundBody))
 	}
+}
+
+func HandleCloudSyncAuthentication(resp http.ResponseWriter, request *http.Request) (SyncKey, error) {
+	apikey := request.Header.Get("Authorization")
+	if len(apikey) > 0 {
+		apikey = strings.Replace(apikey, "  ", " ", -1)
+		if !strings.HasPrefix(apikey, "Bearer ") {
+			log.Printf("[WARNING] Apikey doesn't start with bearer: %s", apikey)
+			return SyncKey{}, errors.New("No bearer token for authorization header")
+		}
+
+		apikeyCheck := strings.Split(apikey, " ")
+		if len(apikeyCheck) != 2 {
+			log.Printf("[WARNING] Invalid format for apikey: %s", apikeyCheck)
+			return SyncKey{}, errors.New("Invalid format for apikey")
+		}
+
+		newApikey := apikeyCheck[1]
+		ctx := GetContext(request)
+		org, err := getSyncApikey(ctx, newApikey)
+		if err != nil {
+			log.Printf("[WARNING] Error in sync check: %s", err)
+			return SyncKey{}, errors.New(fmt.Sprintf("Error finding key: %s", err))
+		}
+
+		return SyncKey{Apikey: newApikey, OrgId: org}, nil
+	}
+
+	return SyncKey{}, errors.New("Missing authentication")
+}
+
+// Fixes potential decision return or reference problems:
+// {{list_tickets}} -> $list_tickets
+// {{list_tickets[0].description}} -> $list_tickets.#0.description
+// {{ticket.description}} -> $ticket.description
+func TranslateBadFieldFormats(fields []Valuereplace) []Valuereplace {
+	for fieldIndex, _ := range fields {
+		field := fields[fieldIndex]
+		if !strings.Contains(field.Value, "{{") || !strings.Contains(field.Value, "}}") {
+			continue
+		}
+
+		// Used for testing
+		//field.Value = strings.ReplaceAll(field.Value, `{{list_tickets[0].summary}}`, `{{ list_tickets[].summary }}`)
+
+		// Regex match {{list_tickets[0].description}} and {{ list_tickets[].description }} and {{ list_tickets[:] }}
+		//re := regexp.MustCompile(`{{\s*([a-zA-Z0-9_]+)(\[[0-9]+\])?(\.[a-zA-Z0-9_]+)?\s*}}`)
+		re := regexp.MustCompile(`{{\s*([a-zA-Z0-9_]+)(\[[0-9]*\])?(\.[a-zA-Z0-9_]+)?\s*}}`)
+		matches := re.FindAllStringSubmatch(field.Value, -1)
+		if len(matches) == 0 {
+			continue
+		}
+
+		stringBuild := "$"
+		for _, match := range matches {
+
+			for i, matchValue := range match {
+				if i == 0 {
+					continue
+				}
+
+				if i != 1 {
+					if len(matchValue) > 0 && !strings.HasPrefix(matchValue, ".") {
+						stringBuild += "."
+					}
+				}
+
+				if strings.HasPrefix(matchValue, "[") && strings.HasSuffix(matchValue, "]") {
+					// Find the formats:
+					// [] -> #
+					// [:] -> #
+					// [0] -> #0
+					// [0:1] -> #0-1
+					// [0:] -> #0-max
+					if matchValue == "[]" || matchValue == "[:]" {
+						stringBuild += "#"
+					} else if strings.Contains(matchValue, ":") {
+						parts := strings.Split(matchValue, ":")
+						if len(parts) == 2 {
+							stringBuild += fmt.Sprintf("#%s-%s", parts[0], parts[1])
+						} else {
+							stringBuild += fmt.Sprintf("#%s-max", parts[0])
+						}
+
+						stringBuild += fmt.Sprintf("#%s", matchValue)
+					} else {
+						// Remove the brackets
+						matchValue = strings.ReplaceAll(matchValue, "[", "")
+						matchValue = strings.ReplaceAll(matchValue, "]", "")
+						stringBuild += fmt.Sprintf("#%s", matchValue)
+					}
+
+					continue
+				}
+
+				stringBuild += matchValue
+			}
+
+			if len(match) > 1 {
+				field.Value = strings.ReplaceAll(field.Value, match[0], stringBuild)
+				fields[fieldIndex].Value = field.Value
+				//log.Printf("VALUE: %#v", field.Value)
+			}
+
+			stringBuild = "$"
+		}
+	}
+
+	return fields
+}
+
+func HandleOrborusFailover(ctx context.Context, request *http.Request, resp http.ResponseWriter, env *Environment) error {
+	if len(env.Id) == 0 || len(env.Name) == 0 {
+		// Avoiding this onprem as it doesn't make sense
+		if project.Environment != "cloud" {
+			return nil
+		}
+
+		resp.WriteHeader(400)
+		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Environment ID or Name is not set"}`)))
+		return errors.New("Environment ID or Name is not set")
+	}
+
+	orborusLabel := request.Header.Get("x-orborus-label")
+	var orboruserr error
+	var orborusData OrborusStats
+	body, bodyerr := ioutil.ReadAll(request.Body)
+	if bodyerr == nil {
+		orboruserr := json.Unmarshal(body, &orborusData)
+		if orboruserr == nil {
+			if time.Now().Unix() > env.Checkin+120 {
+				if debug {
+					log.Printf("[DEBUG] Failover orborus to %s", orborusData.Uuid)
+				}
+
+				env.OrborusUuid = orborusData.Uuid
+			}
+
+			if env.OrborusUuid != orborusData.Uuid && len(env.OrborusUuid) > 0 {
+				resp.WriteHeader(409)
+				resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Orborus UUID mismatch. This means another Orborus (Leader) is already handling this Runtime Location queue."}`)))
+				return errors.New("Orborus UUID mismatch")
+			} else {
+				//env.Checkin = time.Now().Unix()
+			}
+		}
+	}
+
+	timeNow := time.Now().Unix()
+	if request.Method == "POST" {
+
+		// Updates every 90 seconds~
+		if time.Now().Unix() > env.Checkin+90 {
+			env.RunningIp = GetRequestIp(request)
+
+			// Orborus label = custom label for Orborus
+			if len(orborusLabel) > 0 {
+				env.RunningIp = orborusLabel
+			}
+
+			// Set the checkin cache
+			if bodyerr == nil && orboruserr == nil {
+				orborusData.RunningIp = env.RunningIp
+
+				env.OrborusUuid = orborusData.Uuid
+
+				marshalled, err := json.Marshal(orborusData)
+				if err == nil {
+					// Store for a full day. It's reset anyway in the UI at a certain point
+					cacheKey := fmt.Sprintf("queueconfig-%s-%s", env.Name, env.OrgId)
+					go SetCache(context.Background(), cacheKey, marshalled, 1440)
+				}
+
+				if orborusData.Swarm {
+					env.Licensed = true
+					env.RunType = "docker"
+				}
+
+				if orborusData.Kubernetes {
+					env.RunType = "k8s"
+				}
+
+				orborusData.DataLake = env.DataLake
+			}
+
+			env.Checkin = timeNow
+			err := SetEnvironment(ctx, env)
+			if err != nil {
+				log.Printf("[ERROR] Failed updating environment: %s", err)
+			}
+		}
+	}
+
+	if env.Archived {
+		resp.WriteHeader(400)
+		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Can't use archived environments. Make a new environment or restore the existing one."}`)))
+		return errors.New("Environment is archived")
+	}
+
+	return nil
 }
