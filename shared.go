@@ -1539,6 +1539,10 @@ func HandleLogout(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	ip := GetRequestIp(request)
+
+	log.Printf("[AUDIT] Successful logout for user %s (%s) from IP address %s", userInfo.Username, userInfo.Id, ip)
+
 	resp.WriteHeader(200)
 	resp.Write([]byte(`{"success": false, "reason": "Successfully logged out"}`))
 }
@@ -5483,6 +5487,10 @@ func HandleUpdateUser(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
+	ip := GetRequestIp(request)
+
+	log.Printf("[AUDIT] Successfully updated user %s (%s) with IP: %s", foundUser.Username, foundUser.Id, ip)
+
 	resp.WriteHeader(200)
 	resp.Write([]byte(fmt.Sprintf(`{"success": true}`)))
 }
@@ -7919,6 +7927,7 @@ func SaveWorkflow(resp http.ResponseWriter, request *http.Request) {
 		workflow.InputQuestions[qIndex].Required = true
 	}
 
+	isPartner := false
 	correctUser := false
 	if user.Id != tmpworkflow.Owner || tmpworkflow.Public == true {
 		log.Printf("[AUDIT] User %s is accessing workflow %s (save workflow)", user.Username, tmpworkflow.ID)
@@ -7931,47 +7940,77 @@ func SaveWorkflow(resp http.ResponseWriter, request *http.Request) {
 			// Just making sure
 			if project.Environment == "cloud" {
 				//algoliaUser, err := HandleAlgoliaCreatorSearch(ctx, username)
-
-				algoliaUser, err := HandleAlgoliaCreatorSearch(ctx, user.PublicProfile.GithubUsername)
+				
+				// First case : Check if the user's active org is Partner
+				org, err := GetOrg(ctx, user.ActiveOrg.Id)
 				if err != nil {
-					allowList := os.Getenv("GITHUB_USER_ALLOWLIST")
-					log.Printf("[WARNING] User with ID %s for Workflow %s could not be found (workflow update): %s. Username: %s. ACL controlled with GITHUB_USER_ALLOWLIST environment variable. Allowed users: %#v", user.Id, tmpworkflow.ID, err, user.PublicProfile.GithubUsername, allowList)
+					log.Printf("[WARNING] Failed getting org '%s': %s", user.ActiveOrg.Id, err)
+					resp.WriteHeader(500)
+					resp.Write([]byte(`{"success": false, "reason": "Failed getting your org details"}`))
+					return
+				}
 
-					// Check if current user is one of the few allowed
-					// This can only happen if the workflow doesn't already have an owner
-					if user.PublicProfile.Public && len(allowList) > 0 {
-						allowListSplit := strings.Split(allowList, ",")
-						for _, username := range allowListSplit {
-							if username != user.PublicProfile.GithubUsername {
-								continue
-							}
+				if org.LeadInfo.TechPartner || org.LeadInfo.IntegrationPartner || org.LeadInfo.DistributionPartner || org.LeadInfo.ServicePartner || org.LeadInfo.ChannelPartner {
+					isPartner = true
+				}
 
-							algoliaUser, err = HandleAlgoliaCreatorSearch(ctx, user.PublicProfile.GithubUsername)
-							if err != nil {
-								log.Printf("[ERROR] Algolia Creator search error in public workflow edit: %s", err)
-								continue
+				// Check if the partner org owns the workflow and user is an admin
+				if isPartner && (len(workflow.Owner) > 0 && workflow.Owner == user.ActiveOrg.Id && user.Role == "admin") {
+					log.Printf("[INFO] User %s (%s) is saving a public workflow %s as a partner org", user.Username, user.Id, workflow.ID)
+					correctUser = true
+					tmpworkflow.Public = true
+					workflow.Public = true
+
+				// Check if the user is the owns the workflow
+				}else if (len(workflow.Owner) > 0 && workflow.Owner == user.Id) {
+					log.Printf("[INFO] User %s (%s) is saving a public workflow %s", user.Username, user.Id, workflow.ID)
+					correctUser = true
+					tmpworkflow.Public = true
+					workflow.Public = true
+				}else {
+					// Check if the user is allowed to edit the public workflow (Algolia Creator search)
+					algoliaUser, err := HandleAlgoliaCreatorSearch(ctx, user.PublicProfile.GithubUsername)
+					if err != nil {
+						// Using the Allowlist to check if the user is allowed to edit the public workflow
+						allowList := os.Getenv("GITHUB_USER_ALLOWLIST")
+						log.Printf("[WARNING] User with ID %s for Workflow %s could not be found (workflow update): %s. Username: %s. ACL controlled with GITHUB_USER_ALLOWLIST environment variable. Allowed users: %#v", user.Id, tmpworkflow.ID, err, user.PublicProfile.GithubUsername, allowList)
+
+						// Check if current user is one of the few allowed
+						// This can only happen if the workflow doesn't already have an owner
+						if user.PublicProfile.Public && len(allowList) > 0 {
+							allowListSplit := strings.Split(allowList, ",")
+							for _, username := range allowListSplit {
+								if username != user.PublicProfile.GithubUsername {
+									continue
+								}
+
+								algoliaUser, err = HandleAlgoliaCreatorSearch(ctx, user.PublicProfile.GithubUsername)
+								if err != nil {
+									log.Printf("[ERROR] Algolia Creator search error in public workflow edit: %s", err)
+									continue
+								}
+								break
 							}
-							break
 						}
 					}
-				}
 
-				wf2 := PublicCheck{}
-				err = json.Unmarshal([]byte(body), &wf2)
-				if err != nil {
-					log.Printf("[ERROR] Failed workflow unmarshaling (save - 2): %s", err)
-				}
+					wf2 := PublicCheck{}
+					err = json.Unmarshal([]byte(body), &wf2)
+					if err != nil {
+						log.Printf("[ERROR] Failed workflow unmarshaling (save - 2): %s", err)
+					}
 
-				if algoliaUser.ObjectID == user.Id || ArrayContains(algoliaUser.Synonyms, user.Id) {
-					log.Printf("[WARNING] User %s (%s) has access to edit %s! Keep it public!!", user.Username, user.Id, workflow.ID)
+					if algoliaUser.ObjectID == user.Id || ArrayContains(algoliaUser.Synonyms, user.Id) {
+						log.Printf("[WARNING] User %s (%s) has access to edit %s! Keep it public!!", user.Username, user.Id, workflow.ID)
 
-					// Means the owner is using the workflow for their org
-					if wf2.UserEditing == false {
-						correctUser = false
-					} else {
-						correctUser = true
-						tmpworkflow.Public = true
-						workflow.Public = true
+						// Means the owner is using the workflow for their org
+						if wf2.UserEditing == false {
+							correctUser = false
+						} else {
+							correctUser = true
+							tmpworkflow.Public = true
+							workflow.Public = true
+						}
 					}
 				}
 			}
@@ -8516,6 +8555,12 @@ func SaveWorkflow(resp http.ResponseWriter, request *http.Request) {
 	// Only happens if the workflow is public and being edited
 	if correctUser {
 		workflow.Public = true
+		
+		if isPartner && (len(workflow.Owner) > 0 && workflow.Owner != user.Id){
+			workflow.Owner = user.ActiveOrg.Id
+		}else{
+			workflow.Owner = user.Id
+		}
 
 		// Should save it in Algolia too?
 		_, err = handleAlgoliaWorkflowUpdate(ctx, workflow)
@@ -9467,8 +9512,8 @@ func CheckPasswordStrength(username, password string) error {
 
 	} else {
 		// Onprem~
-		if len(password) < 4 {
-			return errors.New("Minimum password length is 4.")
+		if len(password) < 11 {
+			return errors.New("Minimum password length is 10.")
 		}
 	}
 
@@ -10217,6 +10262,42 @@ func GetSpecificWorkflow(resp http.ResponseWriter, request *http.Request) {
 		workflow.BackupConfig = BackupConfig{}
 		workflow.ExecutingOrg = OrgMini{}
 		workflow.Org = []OrgMini{}
+		isPartner := false
+		if len(workflow.Owner) > 0 {
+			// From now on, we will have the owner ID (Org || User)
+			org, err := GetOrg(ctx, workflow.Owner)
+
+			if err == nil {
+				// So the owner is org not user now check if the org is a partner
+				if org.LeadInfo.TechPartner || org.LeadInfo.IntegrationPartner || org.LeadInfo.DistributionPartner || org.LeadInfo.ServicePartner || org.LeadInfo.ChannelPartner{
+					isPartner = true
+				}
+				
+				// If the org is a partner, Check if that org owns the workflow (if not then don't show the owner id)
+				if isPartner && workflow.Owner != user.ActiveOrg.Id && user.Role != "admin" {
+					workflow.Owner = ""
+				}
+
+				if !isPartner {
+					workflow.Owner = ""
+				}
+			}else{
+				// So the owner is user not org
+				log.Printf("[WARNING] Failed getting org for public workflow'%s': %s", workflow.ID, err)
+				
+				// Check if the active user is the actual owner of that public workflow
+				if workflow.Owner != user.Id {
+					// If the user doesn't own the workflow, then don't show the owner
+					workflow.Owner = ""
+				}
+			}
+		}else{
+			// Backward compatibility: Previously we did not store owner or orgId when publishing workflows, only the "updated by" field is there which can be used to determine the owner.
+			if user.Username == workflow.UpdatedBy{
+				workflow.Owner = user.Id
+			}
+		}
+		
 		workflow.OrgId = ""
 
 		if !isOwner {
@@ -12459,7 +12540,10 @@ func HandleEditOrg(resp http.ResponseWriter, request *http.Request) {
 
 	GetTutorials(ctx, *org, true)
 
-	log.Printf("[INFO] Successfully updated org %s (%s) with %d priorities", org.Name, org.Id, len(org.Priorities))
+	ip := GetRequestIp(request)
+
+	log.Printf("[AUDIT] Org %s (%s) updated by user %s (%s) from IP %s - priorities: %d", org.Name, org.Id, user.Username, user.Id, ip, len(org.Priorities))
+
 	resp.WriteHeader(200)
 	resp.Write([]byte(fmt.Sprintf(`{"success": true, "reason": "Successfully updated org"}`)))
 
@@ -12922,7 +13006,7 @@ func SanitizeWorkflow(workflow Workflow) Workflow {
 		_ = variable
 	}
 
-	workflow.Owner = ""
+
 	workflow.Org = []OrgMini{}
 	workflow.OrgId = ""
 	workflow.ExecutingOrg = OrgMini{}
@@ -13845,7 +13929,9 @@ func HandleLogin(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	log.Printf("[AUDIT] Handling login of username %s", data.Username)
+	ip := GetRequestIp(request)
+
+	log.Printf("[AUDIT] Handling login of username %s with IP: %s", data.Username, ip)
 	data.Username = strings.ToLower(strings.TrimSpace(data.Username))
 	err = CheckUsername(data.Username)
 	if err != nil {
@@ -14446,7 +14532,7 @@ func HandleLogin(resp http.ResponseWriter, request *http.Request) {
 		}
 	}
 
-	log.Printf("[INFO] %s SUCCESSFULLY LOGGED IN with session %s", data.Username, userdata.Session)
+	log.Printf("[AUDIT] Login successful for user %s (%s) with IP: %s, session: %s", userdata.Username, userdata.Id, ip, userdata.Session)
 
 	resp.WriteHeader(200)
 	resp.Write([]byte(loginData))
@@ -18916,7 +19002,6 @@ func HandleSetDatastoreKey(resp http.ResponseWriter, request *http.Request) {
 		return
 	}
 
-	// FIXME: Look for "bulk=true" ?
 	var tmpData []CacheKeyData
 	err = json.Unmarshal(body, &tmpData)
 	if err != nil {
@@ -31123,4 +31208,79 @@ func HandleDatastoreCategoryConfig(resp http.ResponseWriter, request *http.Reque
 
 	resp.WriteHeader(http.StatusOK)
 	resp.Write([]byte(`{"success": true}`))
+}
+
+func startSchedule(trigger Trigger, authorization string, workflow Workflow) error { 
+	baseUrl := "https://shuffler.io"
+	if os.Getenv("BASE_URL") != "" {
+		baseUrl = os.Getenv("BASE_URL")
+	}
+
+	if len(os.Getenv("SHUFFLE_CLOUDRUN_URL")) > 0 {
+		baseUrl = os.Getenv("SHUFFLE_CLOUDRUN_URL")
+	}
+
+	scheduleUrl := fmt.Sprintf("%s/api/v1/workflows/%s/schedule", baseUrl, workflow.ID)
+	// POST request to it
+
+	// Every 24 hours in cron
+	foundFrequency := "0 0 * * *"
+	for _, param := range trigger.Parameters {
+		if param.Name == "frequency" && len(param.Value) > 2 {
+			foundFrequency = param.Value
+		}
+	}
+
+	scheduleRequest := Schedule{
+		Name: "Schedule",
+		Frequency: foundFrequency,
+		ExecutionArgument: "Automatically configured by Shuffle",
+		Environment: trigger.Environment,
+		Id: trigger.ID,
+		Start: workflow.Start,
+	}
+
+	parsedBody, err := json.Marshal(scheduleRequest)
+	if err != nil {
+		log.Printf("[ERROR] Failed marshalling schedule request: %s", err)
+		return err 
+	}
+
+	// Send post request
+	client := GetExternalClient(baseUrl)
+	req, err := http.NewRequest(
+		"POST",
+		scheduleUrl,
+		bytes.NewBuffer(parsedBody),
+	)
+
+	if err != nil {
+		return err
+	}
+
+	// Add headers
+	req.Header.Add("Authorization", fmt.Sprintf("Bearer %s", authorization))
+	if len(workflow.OrgId) > 0 {
+		req.Header.Add("Org-Id", workflow.OrgId)
+	}
+
+	// Add content type
+	req.Header.Add("Content-Type", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[ERROR] Failed to start schedule for workflow %s: %s", workflow.ID, err)
+		return err
+	}
+
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		body = []byte{}
+	}
+
+	if resp.StatusCode != 200 {
+		log.Printf("[ERROR] Failed to start schedule for workflow %s: %s. Body: %s", workflow.ID, resp.Status, string(body))
+		return errors.New(fmt.Sprintf("Failed to start schedule for workflow %s: %s", workflow.ID, resp.Status))
+	}
+
+	return nil
 }
