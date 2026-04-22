@@ -1289,8 +1289,8 @@ func HandleGetOrg(resp http.ResponseWriter, request *http.Request) {
 		if err != nil {
 			log.Printf("[ERROR] Failed getting org statistics for %s: %s", org.Id, err)
 		} else {
-			totalWorkflowExecutions := statistics.TotalWorkflowExecutions + statistics.TotalChildWorkflowExecutions
-			if totalWorkflowExecutions > int64(5000) {
+			totalAppExecutions := statistics.TotalAppExecutions + statistics.TotalChildAppExecutions
+			if totalAppExecutions > int64(20000) {
 				org.OldOrg = true
 			}
 		}
@@ -13227,257 +13227,6 @@ func HandleCreateSubOrg(resp http.ResponseWriter, request *http.Request) {
 	resp.WriteHeader(200)
 	resp.Write([]byte(fmt.Sprintf(`{"success": true, "id": "%s", "reason": "Successfully created new sub-org"}`, newOrg.Id)))
 
-}
-
-func resolveParentOrgId(subOrg *Org) string {
-	if subOrg == nil {
-		return ""
-	}
-
-	if subOrg.CreatorOrg != "" {
-		return subOrg.CreatorOrg
-	}
-
-	if len(subOrg.ManagerOrgs) > 0 {
-		return subOrg.ManagerOrgs[0].Id
-	}
-
-	return ""
-}
-
-func clearPromoteSubOrgCaches(ctx context.Context, parentOrgId, subOrgId string, parentOrg *Org, subOrg *Org) {
-	DeleteCache(ctx, fmt.Sprintf("Organizations_%s", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("Organizations_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("%s__childorgs", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("%s_childorgs", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("creator_Organizations_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("apps_%s", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("apps_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("%s_workflows", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("%s_workflows", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("files_%s_", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("files_%s_", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("org_cache_%s_%s_%s", "", parentOrgId, ""))
-	DeleteCache(ctx, fmt.Sprintf("org_cache_%s_%s_%s", "", subOrgId, ""))
-	DeleteCache(ctx, fmt.Sprintf("datastore_category_%s", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("datastore_category_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("workflowappauth_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("workflowappauth_%s", parentOrgId))
-	DeleteCache(ctx, fmt.Sprintf("Environments_%s", subOrgId))
-	DeleteCache(ctx, fmt.Sprintf("Environments_%s", parentOrgId))
-
-	processedUsers := map[string]bool{}
-	allUsers := []User{}
-	if parentOrg != nil {
-		allUsers = append(allUsers, parentOrg.Users...)
-	}
-	if subOrg != nil {
-		allUsers = append(allUsers, subOrg.Users...)
-	}
-
-	for _, orgUser := range allUsers {
-		if processedUsers[orgUser.Id] {
-			continue
-		}
-		processedUsers[orgUser.Id] = true
-
-		DeleteCache(ctx, fmt.Sprintf("user_%s", orgUser.Id))
-		DeleteCache(ctx, fmt.Sprintf("user_%s", orgUser.Username))
-		DeleteCache(ctx, fmt.Sprintf("apps_%s", orgUser.Id))
-		DeleteCache(ctx, fmt.Sprintf("%s_workflows", orgUser.Id))
-		DeleteCache(ctx, fmt.Sprintf("user_orgs_%s", orgUser.Id))
-		DeleteCache(ctx, fmt.Sprintf("Users_%s", orgUser.ApiKey))
-		DeleteCache(ctx, fmt.Sprintf("%s", orgUser.ApiKey))
-		DeleteCache(ctx, orgUser.Session)
-		DeleteCache(ctx, fmt.Sprintf("session_%s", orgUser.Session))
-	}
-}
-
-func HandlePromoteSubOrg(resp http.ResponseWriter, request *http.Request) {
-	cors := HandleCors(resp, request)
-	if cors {
-		return
-	}
-
-	user, err := HandleApiAuthentication(resp, request)
-	if err != nil {
-		log.Printf("[WARNING] Api authentication failed in promote suborg: %s", err)
-		resp.WriteHeader(401)
-		resp.Write([]byte(`{"success": false, "reason": "Authentication failed"}`))
-		return
-	}
-
-	var parentOrgId string
-	location := strings.Split(request.URL.String(), "/")
-	if location[1] == "api" {
-		if len(location) <= 4 {
-			resp.WriteHeader(401)
-			resp.Write([]byte(`{"success": false, "reason": "Bad request path"}`))
-			return
-		}
-
-		parentOrgId = location[4]
-	}
-
-	if strings.Contains(parentOrgId, "?") {
-		parentOrgId = strings.Split(parentOrgId, "?")[0]
-	}
-
-	type promoteRequest struct {
-		OrgId    string `json:"org_id"`
-		SuborgId string `json:"suborg_id"`
-	}
-
-	body, err := ioutil.ReadAll(request.Body)
-	if err != nil {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Failed reading body"}`))
-		return
-	}
-
-	requestData := promoteRequest{}
-	if err := json.Unmarshal(body, &requestData); err != nil {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Invalid request body"}`))
-		return
-	}
-
-	if requestData.OrgId != "" && requestData.OrgId != parentOrgId {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "org_id mismatch between path and body"}`))
-		return
-	}
-
-	if requestData.SuborgId == "" {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "suborg_id is required"}`))
-		return
-	}
-
-	if !user.SupportAccess {
-		log.Printf("[WARNING] User %s (%s) attempted to promote suborg without support access", user.Username, user.Id)
-		resp.WriteHeader(403)
-		resp.Write([]byte(`{"success": false, "reason": "Support access required"}`))
-		return
-	}
-
-	if project.Environment == "cloud" {
-		gceProject := os.Getenv("SHUFFLE_GCEPROJECT")
-		if gceProject != "shuffler" && gceProject != sandboxProject && len(gceProject) > 0 {
-			ctx := GetContext(request)
-			parentOrg, _ := GetOrg(ctx, parentOrgId)
-			subOrg, _ := GetOrg(ctx, requestData.SuborgId)
-			clearPromoteSubOrgCaches(ctx, parentOrgId, requestData.SuborgId, parentOrg, subOrg)
-
-			log.Printf("[DEBUG] Redirecting Promote Suborg request to main site handler (shuffler.io)")
-			RedirectUserRequest(resp, request)
-			return
-		}
-	}
-
-	ctx := GetContext(request)
-	parentOrg, err := GetOrg(ctx, parentOrgId)
-	if err != nil {
-		log.Printf("[WARNING] Failed loading parent org '%s' in promote suborg: %s", parentOrgId, err)
-		resp.WriteHeader(404)
-		resp.Write([]byte(`{"success": false, "reason": "Parent organization not found"}`))
-		return
-	}
-
-	subOrg, err := GetOrg(ctx, requestData.SuborgId)
-	if err != nil {
-		log.Printf("[WARNING] Failed loading suborg '%s' in promote suborg: %s", requestData.SuborgId, err)
-		resp.WriteHeader(404)
-		resp.Write([]byte(`{"success": false, "reason": "Sub-organization not found"}`))
-		return
-	}
-
-	if len(parentOrg.CreatorOrg) > 0 {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Cannot promote from a sub-organization context"}`))
-		return
-	}
-
-	resolvedParentId := resolveParentOrgId(subOrg)
-	if resolvedParentId == "" {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Sub-organization is already standalone"}`))
-		return
-	}
-
-	if resolvedParentId != parentOrg.Id {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Sub-organization does not belong to this parent"}`))
-		return
-	}
-
-	if len(subOrg.ChildOrgs) > 0 {
-		resp.WriteHeader(400)
-		resp.Write([]byte(`{"success": false, "reason": "Cannot promote a sub-organization that has child organizations"}`))
-		return
-	}
-
-	subOrg.CreatorOrg = ""
-	subOrg.ManagerOrgs = []OrgMini{}
-
-	newChildOrgs := []OrgMini{}
-	removedSuborg := false
-	for _, child := range parentOrg.ChildOrgs {
-		if child.Id == subOrg.Id {
-			removedSuborg = true
-			continue
-		}
-
-		newChildOrgs = append(newChildOrgs, child)
-	}
-	parentOrg.ChildOrgs = newChildOrgs
-	subOrg.Description = ""
-
-	if err := SetOrg(ctx, *subOrg, subOrg.Id); err != nil {
-		log.Printf("[ERROR] Failed writing promoted org '%s': %s", subOrg.Id, err)
-		resp.WriteHeader(500)
-		resp.Write([]byte(`{"success": false, "reason": "Failed updating sub-organization"}`))
-		return
-	}
-
-	if err := SetOrg(ctx, *parentOrg, parentOrg.Id); err != nil {
-		log.Printf("[ERROR] Failed writing parent org '%s' while promoting '%s': %s", parentOrg.Id, subOrg.Id, err)
-		resp.WriteHeader(500)
-		resp.Write([]byte(`{"success": false, "reason": "Sub-organization promoted, but parent update failed"}`))
-		return
-	}
-
-	updatedWorkflows := 0
-	subOrgUser := User{
-		ActiveOrg: OrgMini{Id: subOrg.Id},
-		Role:      "admin",
-	}
-
-	workflowItems, err := GetAllWorkflowsByQuery(ctx, subOrgUser, 250, "")
-	if err != nil {
-		log.Printf("[WARNING] Failed loading workflows for promoted org '%s': %s", subOrg.Id, err)
-	}
-
-	for _, workflow := range workflowItems {
-		if workflow.ParentWorkflowId == "" {
-			continue
-		}
-
-		workflow.ParentWorkflowId = ""
-		if err := SetWorkflow(ctx, workflow, workflow.ID); err != nil {
-			log.Printf("[WARNING] Failed updating workflow '%s' while promoting '%s': %s", workflow.ID, subOrg.Id, err)
-			continue
-		}
-
-		updatedWorkflows += 1
-	}
-
-	clearPromoteSubOrgCaches(ctx, parentOrg.Id, subOrg.Id, parentOrg, subOrg)
-
-	log.Printf("[AUDIT] User %s (%s) promoted suborg %s (%s). Parent updated=%t. Workflows=%d", user.Username, user.Id, subOrg.Name, subOrg.Id, removedSuborg, updatedWorkflows)
-
-	resp.WriteHeader(200)
-	resp.Write([]byte(fmt.Sprintf(`{"success": true, "reason": "Sub-organization promoted successfully", "removed_from_parent": %t, "updated_workflows": %d}`, removedSuborg, updatedWorkflows)))
 }
 
 func getSignatureSample(org Org) PaymentSubscription {
@@ -29430,6 +29179,8 @@ func HandleGetUsecase(resp http.ResponseWriter, request *http.Request) {
 		name = location[5]
 	}
 
+	log.Printf("\n\nIN HERE!\n\n")
+
 	ctx := GetContext(request)
 	usecase, err := GetUsecase(ctx, name)
 	if err != nil {
@@ -29579,9 +29330,9 @@ func HandleGetUsecase(resp http.ResponseWriter, request *http.Request) {
 	newjson, err := json.Marshal(usecase)
 	if err != nil {
 		log.Printf("[ERROR] Failed marshal in get usecase: %s", err)
-		resp.WriteHeader(400)
-		resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed unpacking data"}`)))
-		return
+		//resp.WriteHeader(400)
+		//resp.Write([]byte(fmt.Sprintf(`{"success": false, "reason": "Failed unpacking data"}`)))
+		//return
 	}
 
 	resp.WriteHeader(200)
@@ -33714,8 +33465,8 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 			org.SyncFeatures.Branding.Active = false
 			org.Licensed = false
 
-			org.SyncFeatures.WorkflowExecutions.Limit = 10000
-			org.SyncFeatures.WorkflowExecutions.Active = false
+			org.SyncFeatures.AppExecutions.Active = false
+			org.SyncFeatures.AppExecutions.Limit = 25000
 
 			return org
 		}
@@ -33738,11 +33489,11 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 
 						org.SyncFeatures.Branding.Active = features.Branding.Active
 
-						org.SyncFeatures.WorkflowExecutions.Active = features.WorkflowExecutions.Active
-						if features.WorkflowExecutions.Limit < 10000 {
-							org.SyncFeatures.WorkflowExecutions.Limit = 10000
+						org.SyncFeatures.AppExecutions.Active = features.OnpremAppExecutions.Active
+						if features.AppExecutions.Limit < 25000 {
+							org.SyncFeatures.AppExecutions.Limit = 25000
 						} else {
-							org.SyncFeatures.WorkflowExecutions.Limit = features.WorkflowExecutions.Limit
+							org.SyncFeatures.AppExecutions.Limit = features.OnpremAppExecutions.Limit
 						}
 					} else {
 						org.SyncFeatures.MultiEnv.Active = false
@@ -33751,9 +33502,9 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 						org.SyncFeatures.MultiTenant.Active = false
 						org.SyncFeatures.MultiTenant.Limit = 3
 
-						org.SyncFeatures.Branding.Active = features.Branding.Active
-						org.SyncFeatures.WorkflowExecutions.Limit = 10000
-						org.SyncFeatures.WorkflowExecutions.Active = false
+						org.SyncFeatures.Branding.Active = false
+						org.SyncFeatures.AppExecutions.Active = false
+						org.SyncFeatures.AppExecutions.Limit = 25000
 					}
 				} else {
 					org.Licensed = false
@@ -33763,13 +33514,18 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 					org.SyncFeatures.MultiTenant.Active = false
 					org.SyncFeatures.MultiTenant.Limit = 3
 
-					org.SyncFeatures.Branding.Active = features.Branding.Active
-					org.SyncFeatures.WorkflowExecutions.Limit = 10000
-					org.SyncFeatures.WorkflowExecutions.Active = false
+					org.SyncFeatures.Branding.Active = false
+					org.SyncFeatures.AppExecutions.Active = false
+					org.SyncFeatures.AppExecutions.Limit = 25000
+
 				}
 
-				org.SyncFeatures.AppExecutions.Active = features.AppExecutions.Active
-				org.SyncFeatures.AppExecutions.Limit = features.AppExecutions.Limit
+				org.SyncFeatures.AppExecutions.Active = features.OnpremAppExecutions.Active
+				if features.OnpremAppExecutions.Limit < 25000 {
+					org.SyncFeatures.AppExecutions.Limit = 25000
+				} else {
+					org.SyncFeatures.AppExecutions.Limit = features.OnpremAppExecutions.Limit
+				}
 
 				org.SyncFeatures.Webhook.Active = features.Webhook.Active
 				org.SyncFeatures.Webhook.Limit = features.Webhook.Limit
@@ -33826,8 +33582,8 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 			org.SyncFeatures.MultiTenant.Limit = 3
 
 			org.SyncFeatures.Branding.Active = false
-			org.SyncFeatures.WorkflowExecutions.Limit = 10000
-			org.SyncFeatures.WorkflowExecutions.Active = false
+			org.SyncFeatures.AppExecutions.Active = false
+			org.SyncFeatures.AppExecutions.Limit = 25000
 		}
 
 		if len(shuffleLicenseKey) > 0 {
@@ -33844,9 +33600,9 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 					org.SyncFeatures.MultiTenant.Active = license.Tenant.Active
 				}
 
-				if license.WorkflowExecutions.Limit > org.SyncFeatures.WorkflowExecutions.Limit {
-					org.SyncFeatures.WorkflowExecutions.Limit = license.WorkflowExecutions.Limit
-					org.SyncFeatures.WorkflowExecutions.Active = license.WorkflowExecutions.Active
+				if license.AppRuns.Limit > org.SyncFeatures.AppExecutions.Limit {
+					org.SyncFeatures.AppExecutions.Limit = license.AppRuns.Limit
+					org.SyncFeatures.AppExecutions.Active = license.AppRuns.Active
 				}
 
 				org.SyncFeatures.Branding.Active = license.Branding
@@ -33880,10 +33636,10 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 			org.SyncFeatures.MultiTenant.Limit = license.Tenant.Limit
 			org.SyncFeatures.MultiTenant.Active = license.Tenant.Active
 			org.SyncFeatures.Branding.Active = license.Branding
-			org.SyncFeatures.WorkflowExecutions.Active = license.WorkflowExecutions.Active
-			org.SyncFeatures.WorkflowExecutions.Limit = license.WorkflowExecutions.Limit
+			org.SyncFeatures.AppExecutions.Active = license.AppRuns.Active
+			org.SyncFeatures.AppExecutions.Limit = license.AppRuns.Limit
 
-			org.SyncFeatures.AppExecutions.Active = true
+			org.SyncFeatures.WorkflowExecutions.Active = true
 			org.SyncFeatures.Webhook.Active = true
 			org.SyncFeatures.Schedules.Active = true
 			org.SyncFeatures.UserInput.Active = true
@@ -33908,8 +33664,8 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 
 			org.SyncFeatures.Branding.Active = false
 
-			org.SyncFeatures.WorkflowExecutions.Active = false
-			org.SyncFeatures.WorkflowExecutions.Limit = 10000
+			org.SyncFeatures.AppExecutions.Active = false
+			org.SyncFeatures.AppExecutions.Limit = 25000
 		}
 
 		parsedEula := GetOnpremPaidEula()
@@ -33986,8 +33742,8 @@ func HandleCheckLicense(ctx context.Context, org Org) Org {
 
 		org.SyncFeatures.Branding.Active = false
 
-		org.SyncFeatures.WorkflowExecutions.Active = false
-		org.SyncFeatures.WorkflowExecutions.Limit = 10000
+		org.SyncFeatures.AppExecutions.Active = false
+		org.SyncFeatures.AppExecutions.Limit = 25000
 	}
 
 	return org

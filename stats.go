@@ -663,7 +663,7 @@ func HandleGetStatistics(resp http.ResponseWriter, request *http.Request) {
 
 	org := &Org{}
 	ctx := GetContext(request)
-	if orgId == "public" { 
+	if orgId == "public" {
 		if user.SupportAccess {
 			log.Printf("[AUDIT] User %s (%s) is getting org stats for PUBLIC org %s with support access", user.Username, user.Id, orgId)
 		}
@@ -924,7 +924,6 @@ func HandleAppendStatistics(resp http.ResponseWriter, request *http.Request) {
 	resp.WriteHeader(200)
 	resp.Write([]byte(fmt.Sprintf(`{"success": true, "reason": "Cache incremented by %d"}`, inputData.Value)))
 }
-
 
 // Rudementary caching system. WILL go wrong at times without sharding.
 // It's only good for the user in cloud, hence wont bother for a while
@@ -1440,6 +1439,7 @@ func checkAndSetAlertCache(ctx context.Context, cacheKey string) bool {
 		return false
 	}
 
+	err = SetCache(ctx, cacheKey, []byte("sent"), 1440)
 	err = SetCache(ctx, cacheKey, []byte("sent"), 1440)
 	if err != nil {
 		log.Printf("[WARNING] Failed setting alert cache for key %s: %s", cacheKey, err)
@@ -1971,11 +1971,12 @@ func UpdateDetectionStats(ctx context.Context, cacheData CacheKeyData) {
 	}
 
 	// Handle Detection
+	// We actually do this in 'shuffle-security_incidents' tho
 	category := strings.ToLower(cacheData.Category)
-	if category != "ticket" && category != "detection" && category != "tickets" && category != "detections" {
-		if debug {
-			log.Printf("[WARNING] Debug: Not a detection or ticket category, skipping detection stats update for category '%s'", category)
-		}
+	if category != "ticket" && category != "detection" && category != "incidents" {
+		//if debug {
+		//	log.Printf("[WARNING] Debug: Not a detection or ticket category, skipping detection stats update for category '%s'", category)
+		//}
 
 		return
 	}
