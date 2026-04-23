@@ -1439,8 +1439,16 @@ func checkAndSetAlertCache(ctx context.Context, cacheKey string) bool {
 		return false
 	}
 
-	err = SetCache(ctx, cacheKey, []byte("sent"), 1440)
-	err = SetCache(ctx, cacheKey, []byte("sent"), 1440)
+	now := time.Now()
+	endOfMonth := time.Date(now.Year(), now.Month()+1, 1, 0, 0, 0, 0, now.Location())
+	remainingMinutes := int32(endOfMonth.Sub(now).Minutes())
+	if remainingMinutes < 60 {
+		remainingMinutes = 60
+	}
+
+	log.Printf("remaining minutes are: %v", remainingMinutes)
+
+	err = SetCache(ctx, cacheKey, []byte("sent"), remainingMinutes)
 	if err != nil {
 		log.Printf("[WARNING] Failed setting alert cache for key %s: %s", cacheKey, err)
 	}
