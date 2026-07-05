@@ -427,6 +427,7 @@ type DailyStatistics struct {
 	AppUsage []AppUsage `json:"app_usage" datastore:"app_usage"`
 
 	Additions []AdditionalUseConfig `json:"additions,omitempty" datastore:"additions"`
+	Region    string                `json:"region" datastore:"region"`
 }
 
 // Used to be related to users, now related to orgs.
@@ -440,6 +441,7 @@ type ExecutionInfo struct {
 
 	DailyStatistics []DailyStatistics `json:"daily_statistics" datastore:"daily_statistics"`
 	OnpremStats     []DailyStatistics `json:"onprem_stats,omitempty" datastore:"onprem_stats"`
+	RegionSyncStats []DailyStatistics `json:"region_sync_stats,omitempty" datastore:"region_sync_stats"`
 
 	TotalAppExecutions              int64 `json:"total_app_executions" datastore:"total_app_executions"`
 	TotalChildAppExecutions         int64 `json:"total_child_app_executions" datastore:"total_child_app_executions"`
@@ -4985,11 +4987,11 @@ type MinimalConditionParam struct {
 
 // MinimalWorkflow - minimal workflow structure with node positions and connections
 type MinimalWorkflow struct {
-	Actions         []MinimalAction  `json:"actions"`
-	Branches        []MinimalBranch  `json:"branches"`
-	Triggers        []MinimalTrigger `json:"triggers"`
-	Errors          []string         `json:"errors,omitempty"`
-	StartTriggerID  string           `json:"start_trigger_id,omitempty"`
+	Actions        []MinimalAction  `json:"actions"`
+	Branches       []MinimalBranch  `json:"branches"`
+	Triggers       []MinimalTrigger `json:"triggers"`
+	Errors         []string         `json:"errors,omitempty"`
+	StartTriggerID string           `json:"start_trigger_id,omitempty"`
 }
 
 type NGramItem struct {
@@ -5380,28 +5382,28 @@ type AppBuildRequest struct {
 }
 
 type AgentsOpsError struct {
-	Create             string `json:"create"`
-	Run                string `json:"run"`
-	Delete             string `json:"delete"`
-	RunFinished        string `json:"run_finished"`
+	Create          string `json:"create"`
+	Run             string `json:"run"`
+	Delete          string `json:"delete"`
+	RunFinished     string `json:"run_finished"`
 	AgentValidation string `json:"agent_validation"`
 }
 
 type AgentHealth struct {
-	Create             bool    			`json:"create"`
-	Run                bool    			`json:"run"`
-	BackendVersion     string  			`json:"backend_version"`
-	RunFinished        bool    			`json:"run_finished"`
-	ExecutionTook      float64 			`json:"execution_took"`
-	RunStatus          string  			`json:"run_status"`
-	Delete             bool    			`json:"delete"`
-	ExecutionId        string  			`json:"execution_id"`
-	WorkflowId         string  			`json:"workflow_id"`
-	AgentNodeId        string  			`json:"agent_node_id"`
-	AgentStatus        string  			`json:"agent_status"`         // Status of the agent itself (RUNNING, FINISHED, ABORTED)
-	AgentDecisionCount int     			`json:"agent_decision_count"` // Number of decisions made by the agent
-	LLMCallSuccess     bool    			`json:"llm_call_success"`     // Whether the LLM call succeeded
-	Error   		   AgentsOpsError 	`json:"error"`
+	Create             bool           `json:"create"`
+	Run                bool           `json:"run"`
+	BackendVersion     string         `json:"backend_version"`
+	RunFinished        bool           `json:"run_finished"`
+	ExecutionTook      float64        `json:"execution_took"`
+	RunStatus          string         `json:"run_status"`
+	Delete             bool           `json:"delete"`
+	ExecutionId        string         `json:"execution_id"`
+	WorkflowId         string         `json:"workflow_id"`
+	AgentNodeId        string         `json:"agent_node_id"`
+	AgentStatus        string         `json:"agent_status"`         // Status of the agent itself (RUNNING, FINISHED, ABORTED)
+	AgentDecisionCount int            `json:"agent_decision_count"` // Number of decisions made by the agent
+	LLMCallSuccess     bool           `json:"llm_call_success"`     // Whether the LLM call succeeded
+	Error              AgentsOpsError `json:"error"`
 }
 
 type WttrResponse struct {
@@ -5732,10 +5734,11 @@ type DisplaySize struct {
 	OffsetX int `json:"offset_x,omitempty"`
 	OffsetY int `json:"offset_y,omitempty"`
 }
+
 // Added remote control capabilities for windows
-type RemoteControl struct{
-	Op     string                 `json:"op"`
-	Params map[string]any        `json:"params"`
+type RemoteControl struct {
+	Op     string         `json:"op"`
+	Params map[string]any `json:"params"`
 }
 
 type RemoteControlActionBatch struct {
@@ -5758,18 +5761,17 @@ type ActionParameter struct {
 
 // ActionSummary - minimal action info for AI agents
 type ActionSummary struct {
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	Parameters  []ActionParameter  `json:"parameters"`
+	Name        string            `json:"name"`
+	Description string            `json:"description"`
+	Parameters  []ActionParameter `json:"parameters"`
 }
 
 // AppActionResponse - actions grouped by app
 type AppActionResponse struct {
-	AppName string           `json:"app_name"`
-	AppID   string           `json:"app_id"`
-	Actions []ActionSummary  `json:"actions"`
+	AppName string          `json:"app_name"`
+	AppID   string          `json:"app_id"`
+	Actions []ActionSummary `json:"actions"`
 }
-
 
 // WorkflowOperation represents a single modification operation
 type WorkflowOperation struct {

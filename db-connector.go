@@ -2287,7 +2287,7 @@ func Fixexecution(ctx context.Context, workflowExecution WorkflowExecution) (Wor
 		workflowExecution.Workflow.Validation = validation
 	}
 
-	//if debug { 
+	//if debug {
 	//	log.Printf("\n\n[DEBUG][%s] EXEC CHECK? Actions: %d, Results: %d\n\n", workflowExecution.ExecutionId, len(workflowExecution.Workflow.Actions), len(workflowExecution.Results))
 	//}
 
@@ -2303,7 +2303,7 @@ func Fixexecution(ctx context.Context, workflowExecution WorkflowExecution) (Wor
 
 			// Very weird edgecase handling for agent cleanup
 			// This is for auto-correctiveness of executions
-			if len(workflowExecution.Workflow.Actions) == 1 && action.Name == "agent" && innerresult.Action.Name == "agent" && innerresult.Action.ID == "" { 
+			if len(workflowExecution.Workflow.Actions) == 1 && action.Name == "agent" && innerresult.Action.Name == "agent" && innerresult.Action.ID == "" {
 				innerresult.Action.ID = action.ID
 				innerresult.Action.AppName = "AI Agent"
 			}
@@ -2354,24 +2354,24 @@ func Fixexecution(ctx context.Context, workflowExecution WorkflowExecution) (Wor
 				}
 
 				finishFound := false
-				for decisionIndex, decision := range mappedOutput.Decisions { 
-					if decision.Action == "finish" || decision.Category == "finish" { 
+				for decisionIndex, decision := range mappedOutput.Decisions {
+					if decision.Action == "finish" || decision.Category == "finish" {
 
-						if decision.RunDetails.Status != "FINISHED" {  
-							if mappedOutput.Decisions[decisionIndex].RunDetails.StartedAt == 0 { 
-								mappedOutput.Decisions[decisionIndex].RunDetails.StartedAt = time.Now().UnixMilli() 
+						if decision.RunDetails.Status != "FINISHED" {
+							if mappedOutput.Decisions[decisionIndex].RunDetails.StartedAt == 0 {
+								mappedOutput.Decisions[decisionIndex].RunDetails.StartedAt = time.Now().UnixMilli()
 							}
 
-							mappedOutput.Decisions[decisionIndex].RunDetails.CompletedAt = time.Now().UnixMilli() 
+							mappedOutput.Decisions[decisionIndex].RunDetails.CompletedAt = time.Now().UnixMilli()
 							mappedOutput.Decisions[decisionIndex].RunDetails.Status = "FINISHED"
 							decisionsUpdated = true
 						}
-				
+
 						finishFound = true
 					}
 				}
 
-				if finishFound { 
+				if finishFound {
 					mappedOutput.Status = "FINISHED"
 
 					result.Status = "SUCCESS"
@@ -2400,7 +2400,7 @@ func Fixexecution(ctx context.Context, workflowExecution WorkflowExecution) (Wor
 						if decision.Action == "finish" {
 							finishDecisionFound = true
 
-							if decision.RunDetails.Status == "" { 
+							if decision.RunDetails.Status == "" {
 								decision.RunDetails.Status = "FINISHED"
 								mappedOutput.Decisions[decisionIndex].RunDetails.Status = "FINISHED"
 							}
@@ -5776,18 +5776,18 @@ func SetOrg(ctx context.Context, data Org, id string) error {
 			return err
 		}
 
-		if data.Region != "" && data.Region != "europe-west2" && gceProject == "shuffler" {
-			go func() {
-				err := propagateOrg(data, false)
-				if err != nil {
-					if !strings.Contains(fmt.Sprintf("%s", err), "no SHUFFLE_PROPAGATE_URL") {
-						log.Printf("[ERROR] Failed propagating org %s for region %#v: %s", data.Id, data.Region, err)
-					}
-				} else {
-					//log.Printf("[INFO] Successfully propagated org %s to region %#v", data.Id, data.Region)
-				}
-			}()
-		}
+		// if data.Region != "" && data.Region != "europe-west2" && gceProject == "shuffler" {
+		// 	go func() {
+		// 		err := propagateOrg(data, false)
+		// 		if err != nil {
+		// 			if !strings.Contains(fmt.Sprintf("%s", err), "no SHUFFLE_PROPAGATE_URL") {
+		// 				log.Printf("[ERROR] Failed propagating org %s for region %#v: %s", data.Id, data.Region, err)
+		// 			}
+		// 		} else {
+		// 			//log.Printf("[INFO] Successfully propagated org %s to region %#v", data.Id, data.Region)
+		// 		}
+		// 	}()
+		// }
 	}
 
 	if project.CacheDb {
@@ -6970,15 +6970,15 @@ func SetUser(ctx context.Context, user *User, updateOrg bool) error {
 			return err
 		}
 
-		if len(user.Regions) > 1 {
-			go func() {
-				log.Printf("[INFO] Propagating user %s in org %s (%s) with region %#v", user.Username, user.ActiveOrg.Name, user.ActiveOrg.Id, user.Regions)
-				err = propagateUser(*user, false)
-				if err != nil {
-					log.Printf("[ERROR] Failed propagating user %s (%s) with region %#v: %s", user.Username, user.Id, user.Regions, err)
-				}
-			}()
-		}
+		// if len(user.Regions) > 1 {
+		// 	go func() {
+		// 		log.Printf("[INFO] Propagating user %s in org %s (%s) with region %#v", user.Username, user.ActiveOrg.Name, user.ActiveOrg.Id, user.Regions)
+		// 		err = propagateUser(*user, false)
+		// 		if err != nil {
+		// 			log.Printf("[ERROR] Failed propagating user %s (%s) with region %#v: %s", user.Username, user.Id, user.Regions, err)
+		// 		}
+		// 	}()
+		// }
 	}
 
 	DeleteCache(ctx, user.ApiKey)
@@ -11893,7 +11893,7 @@ func GetOrgNotifications(ctx context.Context, orgId string) ([]Notification, err
 			"size": 1000,
 			"sort": map[string]interface{}{
 				"updated_at": map[string]interface{}{
-					"order": "desc",
+					"order":         "desc",
 					"unmapped_type": "long",
 				},
 			},
@@ -17316,37 +17316,37 @@ func GetAllCacheKeys(ctx context.Context, orgId string, category string, max int
 		if parentOrgDepth >= 3 {
 			log.Printf("[ERROR] Reached maximum parent org lookup depth (%d) for org %s. Skipping parent org cache lookup to prevent infinite recursion.", parentOrgDepth, orgId)
 		} else {
-		parentOrg, err := GetOrg(ctx, foundOrg.CreatorOrg)
-		if err != nil {
+			parentOrg, err := GetOrg(ctx, foundOrg.CreatorOrg)
+			if err != nil {
 				if debug {
 					log.Printf("[DEBUG] Could not find parent org %s for org %s (possibly in different region): %s", foundOrg.CreatorOrg, orgId, err)
 				}
-		} else {
+			} else {
 				parentOrgCache, _, err := GetAllCacheKeys(ctx, parentOrg.Id, "", max, inputcursor, cleanupDepth, parentOrgDepth+1)
-			if err != nil {
+				if err != nil {
 					if debug {
 						log.Printf("[DEBUG] Failed getting parent org cache keys for org %s: %s", parentOrg.Id, err)
 					}
-			} else {
-				if debug {
-					//log.Printf("[DEBUG] Loaded %d parent org cache keys for org %s. Validating if child org %s should get the keys", len(parentOrgCache), parentOrg.Id, orgId)
-				}
-
-				for _, parentCache := range parentOrgCache {
-					/*
-						if debug && len(parentCache.SuborgDistribution) > 0 {
-							log.Printf("[DEBUG] Parent org %s keys: %#v", parentOrg.Id, parentCache.SuborgDistribution)
-						}
-					*/
-
-					if !ArrayContains(parentCache.SuborgDistribution, orgId) {
-						continue
+				} else {
+					if debug {
+						//log.Printf("[DEBUG] Loaded %d parent org cache keys for org %s. Validating if child org %s should get the keys", len(parentOrgCache), parentOrg.Id, orgId)
 					}
 
-					// Clean up just in case
-					parentCache.PublicAuthorization = ""
-					parentCache.SuborgDistribution = []string{orgId}
-					cacheKeys = append(cacheKeys, parentCache)
+					for _, parentCache := range parentOrgCache {
+						/*
+							if debug && len(parentCache.SuborgDistribution) > 0 {
+								log.Printf("[DEBUG] Parent org %s keys: %#v", parentOrg.Id, parentCache.SuborgDistribution)
+							}
+						*/
+
+						if !ArrayContains(parentCache.SuborgDistribution, orgId) {
+							continue
+						}
+
+						// Clean up just in case
+						parentCache.PublicAuthorization = ""
+						parentCache.SuborgDistribution = []string{orgId}
+						cacheKeys = append(cacheKeys, parentCache)
 					}
 				}
 			}

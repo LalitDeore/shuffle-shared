@@ -23,7 +23,7 @@ import (
 // FIXME: There is some issue when going past 0x9 (>0xA) with how
 // cache is being counted locally
 // var dbInterval = 0x20
-var dbInterval = 0x9
+var dbInterval = 1
 
 // var dbInterval = 0x4
 var PredictableDataTypes = []string{
@@ -666,7 +666,7 @@ func HandleGetStatistics(resp http.ResponseWriter, request *http.Request) {
 
 	org := &Org{}
 	ctx := GetContext(request)
-	if orgId == "public" { 
+	if orgId == "public" {
 		if user.SupportAccess {
 			log.Printf("[AUDIT] User %s (%s) is getting org stats for PUBLIC org %s with support access", user.Username, user.Id, orgId)
 		}
@@ -956,7 +956,6 @@ func HandleAppendStatistics(resp http.ResponseWriter, request *http.Request) {
 	resp.WriteHeader(200)
 	resp.Write([]byte(fmt.Sprintf(`{"success": true, "reason": "Cache incremented by %d"}`, inputData.Value)))
 }
-
 
 // Rudementary caching system. WILL go wrong at times without sharding.
 // It's only good for the user in cloud, hence wont bother for a while
@@ -1326,116 +1325,99 @@ func IncrementCache(ctx context.Context, orgId, dataType string, amount ...int) 
 // 2. If there isn't, set it and clear out the daily records
 // Also: can we dump a list of apps that run? Maybe a list of them?
 func handleDailyCacheUpdate(executionInfo *ExecutionInfo) *ExecutionInfo {
-	timeYesterday := time.Now().AddDate(0, 0, -1)
-	timeYesterdayFormatted := timeYesterday.Format("2006-12-02")
+	currentDate := time.Now().Format("2006-01-02")
 
-	for _, day := range executionInfo.DailyStatistics {
+	// check if today's date exists in daily stats, if not (new day), append it and reset daily values
+	if len(executionInfo.DailyStatistics) == 0 || executionInfo.DailyStatistics[len(executionInfo.DailyStatistics)-1].Date.Format("2006-01-02") != currentDate {
+		executionInfo.DailyStatistics = append(executionInfo.DailyStatistics, DailyStatistics{
+			Date: time.Now(),
+		})
 
-		// Check if the day.Date is the same as yesterday and return if it is
-		if day.Date.Format("2006-12-02") == timeYesterdayFormatted {
-			for additionIndex, _ := range executionInfo.Additions {
-				executionInfo.Additions[additionIndex].DailyValue = 0
-			}
+		// Reset daily and hourly/weekly fields so they start fresh
+		executionInfo.HourlyAppExecutions = 0
+		executionInfo.HourlyChildAppExecutions = 0
+		executionInfo.HourlyAppExecutionsFailed = 0
+		executionInfo.HourlySubflowExecutions = 0
+		executionInfo.HourlyWorkflowExecutions = 0
+		executionInfo.HourlyWorkflowExecutionsFinished = 0
+		executionInfo.HourlyChildWorkflowExecutions = 0
+		executionInfo.HourlyWorkflowExecutionsFailed = 0
+		executionInfo.HourlyOrgSyncActions = 0
+		executionInfo.HourlyCloudExecutions = 0
+		executionInfo.HourlyOnpremExecutions = 0
 
-			return executionInfo
+		executionInfo.DailyAppExecutions = 0
+		executionInfo.DailyChildAppExecutions = 0
+		executionInfo.DailyAppExecutionsFailed = 0
+		executionInfo.DailySubflowExecutions = 0
+		executionInfo.DailyWorkflowExecutions = 0
+		executionInfo.DailyWorkflowExecutionsFinished = 0
+		executionInfo.DailyChildWorkflowExecutions = 0
+		executionInfo.DailyWorkflowExecutionsFailed = 0
+		executionInfo.DailyOrgSyncActions = 0
+		executionInfo.DailyCloudExecutions = 0
+		executionInfo.DailyOnpremExecutions = 0
+		executionInfo.DailyApiUsage = 0
+		executionInfo.DailyAIUsage = 0
+		executionInfo.DailyAgentExecutions = 0
+		executionInfo.DailyAgentTokens = 0
+		executionInfo.DailyAgentInputTokens = 0
+		executionInfo.DailyAgentOutputTokens = 0
+		executionInfo.DailyChildOrgAiUsage = 0
+		executionInfo.DailyChildOrgAgentExecutions = 0
+		executionInfo.DailyChildOrgAgentTokens = 0
+		executionInfo.DailyChildOrgAgentInputTokens = 0
+		executionInfo.DailyChildOrgAgentOutputTokens = 0
+		executionInfo.DailySMSUsage = 0
+		executionInfo.DailyChildOrgSMSUsage = 0
+		executionInfo.DailyEmailUsage = 0
+		executionInfo.DailyChildOrgEmailUsage = 0
+
+		executionInfo.WeeklyAppExecutions = 0
+		executionInfo.WeeklyChildAppExecutions = 0
+		executionInfo.WeeklyAppExecutionsFailed = 0
+		executionInfo.WeeklySubflowExecutions = 0
+		executionInfo.WeeklyWorkflowExecutions = 0
+		executionInfo.WeeklyWorkflowExecutionsFinished = 0
+		executionInfo.WeeklyWorkflowExecutionsFailed = 0
+		executionInfo.WeeklyOrgSyncActions = 0
+		executionInfo.WeeklyCloudExecutions = 0
+		executionInfo.WeeklyOnpremExecutions = 0
+		executionInfo.WeeklyChildWorkflowExecutions = 0
+
+		for additionIndex := range executionInfo.Additions {
+			executionInfo.Additions[additionIndex].Value = 0
+			executionInfo.Additions[additionIndex].DailyValue = 0
 		}
-	}
-
-	log.Printf("[DEBUG] Daily stats not updated for %s in org %s today. Only have %d stats so far - running update.", timeYesterday, executionInfo.OrgId, len(executionInfo.DailyStatistics))
-	// If we get here, we need to update the daily stats
-	newDay := DailyStatistics{
-		Date:                       timeYesterday,
-		AppExecutions:              executionInfo.DailyAppExecutions,
-		ChildAppExecutions:         executionInfo.DailyChildAppExecutions,
-		AppExecutionsFailed:        executionInfo.DailyAppExecutionsFailed,
-		SubflowExecutions:          executionInfo.DailySubflowExecutions,
-		WorkflowExecutions:         executionInfo.DailyWorkflowExecutions,
-		WorkflowExecutionsFinished: executionInfo.DailyWorkflowExecutionsFinished,
-		WorkflowExecutionsFailed:   executionInfo.DailyWorkflowExecutionsFailed,
-		OrgSyncActions:             executionInfo.DailyOrgSyncActions,
-		CloudExecutions:            executionInfo.DailyCloudExecutions,
-		OnpremExecutions:           executionInfo.DailyOnpremExecutions,
-		AIUsage:                    executionInfo.DailyAIUsage,
-		AgentExecutions:            executionInfo.DailyAgentExecutions,
-		AgentTokens:                executionInfo.DailyAgentTokens,
-		AgentInputTokens:           executionInfo.DailyAgentInputTokens,
-		AgentOutputTokens:          executionInfo.DailyAgentOutputTokens,
-		ChildOrgAiUsage:            executionInfo.DailyChildOrgAiUsage,
-		ChildOrgAgentExecutions:    executionInfo.DailyChildOrgAgentExecutions,
-		ChildOrgAgentTokens:        executionInfo.DailyChildOrgAgentTokens,
-		ChildOrgAgentInputTokens:   executionInfo.DailyChildOrgAgentInputTokens,
-		ChildOrgAgentOutputTokens:  executionInfo.DailyChildOrgAgentOutputTokens,
-		DailySMSUsage:              executionInfo.DailySMSUsage,
-		DailyChildOrgSMSUsage:      executionInfo.DailyChildOrgSMSUsage,
-		DailyEmailUsage:            executionInfo.DailyEmailUsage,
-		DailyChildOrgEmailUsage:    executionInfo.DailyChildOrgEmailUsage,
-
-		ApiUsage: executionInfo.DailyApiUsage,
-
-		Additions: executionInfo.Additions,
-	}
-
-	executionInfo.DailyStatistics = append(executionInfo.DailyStatistics, newDay)
-
-	// Cleaning up old stuff we don't use for now
-	executionInfo.HourlyAppExecutions = 0
-	executionInfo.HourlyChildAppExecutions = 0
-	executionInfo.HourlyAppExecutionsFailed = 0
-	executionInfo.HourlySubflowExecutions = 0
-	executionInfo.HourlyWorkflowExecutions = 0
-	executionInfo.HourlyWorkflowExecutionsFinished = 0
-	executionInfo.HourlyChildWorkflowExecutions = 0
-	executionInfo.HourlyWorkflowExecutionsFailed = 0
-	executionInfo.HourlyOrgSyncActions = 0
-	executionInfo.HourlyCloudExecutions = 0
-	executionInfo.HourlyOnpremExecutions = 0
-
-	// Reset daily
-	executionInfo.DailyAppExecutions = 0
-	executionInfo.DailyChildAppExecutions = 0
-	executionInfo.DailyAppExecutionsFailed = 0
-	executionInfo.DailySubflowExecutions = 0
-	executionInfo.DailyWorkflowExecutions = 0
-	executionInfo.DailyWorkflowExecutionsFinished = 0
-	executionInfo.DailyChildWorkflowExecutions = 0
-	executionInfo.DailyWorkflowExecutionsFailed = 0
-	executionInfo.DailyOrgSyncActions = 0
-	executionInfo.DailyCloudExecutions = 0
-	executionInfo.DailyOnpremExecutions = 0
-	executionInfo.DailyApiUsage = 0
-	executionInfo.DailyAIUsage = 0
-	executionInfo.DailyChildOrgAiUsage = 0
-	executionInfo.DailyAgentExecutions = 0
-	executionInfo.DailyAgentTokens = 0
-	executionInfo.DailyAgentInputTokens = 0
-	executionInfo.DailyAgentOutputTokens = 0
-	executionInfo.DailyChildOrgAiUsage = 0
-	executionInfo.DailyChildOrgAgentExecutions = 0
-	executionInfo.DailyChildOrgAgentTokens = 0
-	executionInfo.DailyChildOrgAgentInputTokens = 0
-	executionInfo.DailyChildOrgAgentOutputTokens = 0
-	executionInfo.DailySMSUsage = 0
-	executionInfo.DailyChildOrgSMSUsage = 0
-	executionInfo.DailyEmailUsage = 0
-	executionInfo.DailyChildOrgEmailUsage = 0
-
-	// Weekly
-	executionInfo.WeeklyAppExecutions = 0
-	executionInfo.WeeklyChildAppExecutions = 0
-	executionInfo.WeeklyAppExecutionsFailed = 0
-	executionInfo.WeeklySubflowExecutions = 0
-	executionInfo.WeeklyWorkflowExecutions = 0
-	executionInfo.WeeklyWorkflowExecutionsFinished = 0
-	executionInfo.WeeklyWorkflowExecutionsFailed = 0
-	executionInfo.WeeklyOrgSyncActions = 0
-	executionInfo.WeeklyCloudExecutions = 0
-	executionInfo.WeeklyOnpremExecutions = 0
-	executionInfo.WeeklyChildWorkflowExecutions = 0
-
-	// Cleans up "random" stats as well
-	for additionIndex, _ := range executionInfo.Additions {
-		executionInfo.Additions[additionIndex].Value = 0
-		executionInfo.Additions[additionIndex].DailyValue = 0
+	} else {
+		// Update today's stats on each increment
+		lastIdx := len(executionInfo.DailyStatistics) - 1
+		executionInfo.DailyStatistics[lastIdx].AppExecutions = executionInfo.DailyAppExecutions
+		executionInfo.DailyStatistics[lastIdx].ChildAppExecutions = executionInfo.DailyChildAppExecutions
+		executionInfo.DailyStatistics[lastIdx].AppExecutionsFailed = executionInfo.DailyAppExecutionsFailed
+		executionInfo.DailyStatistics[lastIdx].SubflowExecutions = executionInfo.DailySubflowExecutions
+		executionInfo.DailyStatistics[lastIdx].WorkflowExecutions = executionInfo.DailyWorkflowExecutions
+		executionInfo.DailyStatistics[lastIdx].WorkflowExecutionsFinished = executionInfo.DailyWorkflowExecutionsFinished
+		executionInfo.DailyStatistics[lastIdx].WorkflowExecutionsFailed = executionInfo.DailyWorkflowExecutionsFailed
+		executionInfo.DailyStatistics[lastIdx].OrgSyncActions = executionInfo.DailyOrgSyncActions
+		executionInfo.DailyStatistics[lastIdx].CloudExecutions = executionInfo.DailyCloudExecutions
+		executionInfo.DailyStatistics[lastIdx].OnpremExecutions = executionInfo.DailyOnpremExecutions
+		executionInfo.DailyStatistics[lastIdx].AIUsage = executionInfo.DailyAIUsage
+		executionInfo.DailyStatistics[lastIdx].ApiUsage = executionInfo.DailyApiUsage
+		executionInfo.DailyStatistics[lastIdx].Additions = executionInfo.Additions
+		executionInfo.DailyStatistics[lastIdx].AgentExecutions = executionInfo.DailyAgentExecutions
+		executionInfo.DailyStatistics[lastIdx].AgentTokens = executionInfo.DailyAgentTokens
+		executionInfo.DailyStatistics[lastIdx].AgentInputTokens = executionInfo.DailyAgentInputTokens
+		executionInfo.DailyStatistics[lastIdx].ChildOrgAgentInputTokens = executionInfo.DailyChildOrgAgentInputTokens
+		executionInfo.DailyStatistics[lastIdx].AgentOutputTokens = executionInfo.DailyAgentOutputTokens
+		executionInfo.DailyStatistics[lastIdx].ChildOrgAgentOutputTokens = executionInfo.DailyChildOrgAgentOutputTokens
+		executionInfo.DailyStatistics[lastIdx].ChildOrgAiUsage = executionInfo.DailyChildOrgAiUsage
+		executionInfo.DailyStatistics[lastIdx].ChildOrgAgentExecutions = executionInfo.DailyChildOrgAgentExecutions
+		executionInfo.DailyStatistics[lastIdx].ChildOrgAgentTokens = executionInfo.DailyChildOrgAgentTokens
+		executionInfo.DailyStatistics[lastIdx].DailySMSUsage = executionInfo.DailySMSUsage
+		executionInfo.DailyStatistics[lastIdx].DailyChildOrgSMSUsage = executionInfo.DailyChildOrgSMSUsage
+		executionInfo.DailyStatistics[lastIdx].DailyEmailUsage = executionInfo.DailyEmailUsage
+		executionInfo.DailyStatistics[lastIdx].DailyChildOrgEmailUsage = executionInfo.DailyChildOrgEmailUsage
 	}
 
 	now := time.Now()
